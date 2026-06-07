@@ -31,6 +31,7 @@ OUTPUT_DIR = os.path.join(APP_HOME, "temp_outputs")
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 OUTPUT_SAMPLE_RATES = {44100, 48000, 96000}
 OUTPUT_BIT_DEPTHS = {"16", "24"}
+FINAL_PCM_CEILING_DB = -0.3
 ENABLE_GTCRN_MODEL = os.getenv("RESONIX_ENABLE_GTCRN", "0") == "1"
 GTCRN_MAX_MODEL_SECONDS = 8.0
 PROCESSING_TARGETS = [
@@ -50,7 +51,7 @@ TARGET_PROFILES = {
         "high_boost_db": 0.6,
         "compress_ratio": 1.2,
         "target_lufs": -18.0,
-        "limiter_ceiling_db": -1.2,
+        "limiter_ceiling_db": -1.5,
         "exciter_amount": 0.05,
         "saturation_amount": 0.02,
     },
@@ -61,7 +62,7 @@ TARGET_PROFILES = {
         "high_boost_db": 1.0,
         "compress_ratio": 1.25,
         "target_lufs": -16.0,
-        "limiter_ceiling_db": -1.0,
+        "limiter_ceiling_db": -1.5,
         "exciter_amount": 0.08,
         "saturation_amount": 0.03,
     },
@@ -72,7 +73,7 @@ TARGET_PROFILES = {
         "high_boost_db": 2.4,
         "compress_ratio": 1.25,
         "target_lufs": -15.0,
-        "limiter_ceiling_db": -1.0,
+        "limiter_ceiling_db": -1.7,
         "exciter_amount": 0.18,
         "saturation_amount": 0.02,
     },
@@ -83,7 +84,7 @@ TARGET_PROFILES = {
         "high_boost_db": -0.8,
         "compress_ratio": 1.45,
         "target_lufs": -17.0,
-        "limiter_ceiling_db": -1.1,
+        "limiter_ceiling_db": -1.5,
         "exciter_amount": 0.03,
         "saturation_amount": 0.16,
     },
@@ -94,7 +95,7 @@ TARGET_PROFILES = {
         "high_boost_db": 1.6,
         "compress_ratio": 2.8,
         "target_lufs": -12.0,
-        "limiter_ceiling_db": -0.8,
+        "limiter_ceiling_db": -1.2,
         "exciter_amount": 0.12,
         "saturation_amount": 0.1,
     },
@@ -105,7 +106,7 @@ TARGET_PROFILES = {
         "high_boost_db": 0.3,
         "compress_ratio": 1.7,
         "target_lufs": -15.0,
-        "limiter_ceiling_db": -1.0,
+        "limiter_ceiling_db": -1.7,
         "exciter_amount": 0.04,
         "saturation_amount": 0.08,
     },
@@ -116,7 +117,7 @@ TARGET_PROFILES = {
         "high_boost_db": 1.8,
         "compress_ratio": 1.8,
         "target_lufs": -16.0,
-        "limiter_ceiling_db": -1.0,
+        "limiter_ceiling_db": -1.5,
         "exciter_amount": 0.1,
         "saturation_amount": 0.04,
     },
@@ -373,7 +374,19 @@ def resolve_output_sample_rate(option: str | None, source_sr: int, default_sr: i
     return requested if requested in OUTPUT_SAMPLE_RATES else int(default_sr)
 
 
+def apply_sample_peak_guard(audio: np.ndarray, ceiling_db: float = FINAL_PCM_CEILING_DB) -> tuple[np.ndarray, float]:
+    ceiling = 10 ** (ceiling_db / 20.0)
+    sanitized = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    peak = float(np.max(np.abs(sanitized))) if sanitized.size else 0.0
+    if peak <= ceiling or peak <= 1e-9:
+        return sanitized, 0.0
+
+    gain = ceiling / peak
+    return (sanitized * gain).astype(np.float32), db(gain)
+
+
 def write_audio(path: str, audio: np.ndarray, sr: int, bit_depth: str | None = "24") -> None:
+    audio, _ = apply_sample_peak_guard(audio)
     subtype = None
     if os.path.splitext(path)[1].lower() == ".wav":
         subtype = "PCM_16" if resolve_output_bit_depth(bit_depth) == "16" else "PCM_24"
@@ -582,7 +595,7 @@ def clamp_dsp_params(params: dict[str, Any]) -> dict[str, Any]:
         "high_boost_db": float(np.clip(float(params.get("high_boost_db", 0)), -6, 6)),
         "compress_ratio": float(np.clip(float(params.get("compress_ratio", 1.0)), 1.0, 4.0)),
         "target_lufs": float(np.clip(float(params.get("target_lufs", -16.0)), -24.0, -10.0)),
-        "limiter_ceiling_db": float(np.clip(float(params.get("limiter_ceiling_db", -1.0)), -3.0, -0.2)),
+        "limiter_ceiling_db": float(np.clip(float(params.get("limiter_ceiling_db", -1.5)), -3.0, -0.8)),
         "exciter_amount": float(np.clip(float(params.get("exciter_amount", 0.0)), 0.0, 0.35)),
         "saturation_amount": float(np.clip(float(params.get("saturation_amount", 0.0)), 0.0, 0.35)),
         "normalize": params.get("normalize", True) is not False,
@@ -1004,24 +1017,53 @@ def apply_harmonic_exciter(audio: np.ndarray, sr: int, amount: float) -> np.ndar
     return (audio + excited * amount).astype(np.float32)
 
 
-def apply_loudness_normalize(audio: np.ndarray, target_lufs: float) -> tuple[np.ndarray, float]:
+def apply_loudness_normalize(
+    audio: np.ndarray,
+    target_lufs: float,
+    limiter_ceiling_db: float,
+    max_limiter_drive_db: float = 1.5,
+) -> tuple[np.ndarray, float, bool]:
     rms = float(np.sqrt(np.mean(np.square(audio))))
     if rms <= 1e-9:
-        return audio, 0.0
+        return audio, 0.0, False
 
     current_lufs = db(rms) - 0.691
-    gain_db = float(np.clip(target_lufs - current_lufs, -18.0, 18.0))
+    desired_gain_db = float(np.clip(target_lufs - current_lufs, -18.0, 18.0))
+    true_peak_db = db(estimate_true_peak(audio, oversample_factor=2))
+    max_gain_db = (limiter_ceiling_db + max_limiter_drive_db) - true_peak_db
+    gain_db = min(desired_gain_db, max_gain_db)
     gain = 10 ** (gain_db / 20.0)
-    return (audio * gain).astype(np.float32), gain_db
+    return (audio * gain).astype(np.float32), gain_db, gain_db < desired_gain_db - 0.05
 
 
-def apply_soft_limiter(audio: np.ndarray, ceiling_db: float) -> np.ndarray:
+def apply_soft_limiter(audio: np.ndarray, ceiling_db: float, sr: int) -> np.ndarray:
     ceiling = 10 ** (ceiling_db / 20.0)
     if ceiling <= 0.0:
         return audio
 
-    limited = ceiling * np.tanh(audio / ceiling)
-    return np.clip(limited, -ceiling, ceiling).astype(np.float32)
+    channels = as_channel_matrix(audio).astype(np.float64)
+    linked_peak = np.max(np.abs(channels), axis=0)
+    if float(np.max(linked_peak)) <= ceiling:
+        return audio.astype(np.float32)
+
+    desired_gain = np.minimum(1.0, ceiling / (linked_peak + 1e-12))
+    release_seconds = 0.08
+    release_coeff = float(np.exp(-1.0 / max(sr * release_seconds, 1.0)))
+    gain = np.empty_like(desired_gain)
+    current_gain = 1.0
+
+    for index, target_gain in enumerate(desired_gain):
+        if target_gain < current_gain:
+            current_gain = float(target_gain)
+        else:
+            current_gain = float(target_gain + (current_gain - target_gain) * release_coeff)
+        gain[index] = current_gain
+
+    limited = channels * gain[np.newaxis, :]
+    limited = np.clip(limited, -ceiling, ceiling)
+    if audio.ndim == 1:
+        return limited[0].astype(np.float32)
+    return limited.astype(np.float32)
 
 
 def apply_true_peak_headroom(
@@ -1153,11 +1195,17 @@ def process_audio_chain(
         steps.append(f"high_quality_resample_{sr}_to_{output_sr}")
 
     if params["normalize"]:
-        processed_audio, gain_db = apply_loudness_normalize(processed_audio, params["target_lufs"])
+        processed_audio, gain_db, gain_limited = apply_loudness_normalize(
+            processed_audio,
+            params["target_lufs"],
+            params["limiter_ceiling_db"],
+        )
         steps.append(f"loudness_normalize_{gain_db:+.1f}db")
+        if gain_limited:
+            steps.append("peak_aware_gain_limited")
 
-    processed_audio = apply_soft_limiter(processed_audio, params["limiter_ceiling_db"])
-    steps.append("soft_limiter")
+    processed_audio = apply_soft_limiter(processed_audio, params["limiter_ceiling_db"], output_sr)
+    steps.append("linked_peak_limiter")
     processed_audio, true_peak_gain_db, true_peak_before_db = apply_true_peak_headroom(
         processed_audio,
         params["limiter_ceiling_db"],
@@ -1166,6 +1214,10 @@ def process_audio_chain(
         steps.append(f"true_peak_trim_{true_peak_gain_db:+.1f}db_from_{true_peak_before_db:.1f}db")
     else:
         steps.append("true_peak_checked")
+
+    processed_audio, sample_peak_gain_db = apply_sample_peak_guard(processed_audio)
+    if sample_peak_gain_db < -0.01:
+        steps.append(f"final_sample_peak_guard_{sample_peak_gain_db:+.1f}db")
 
     return processed_audio.astype(np.float32), output_sr, steps
 
