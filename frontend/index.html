@@ -665,6 +665,7 @@
 
         .audio-player-wrapper { margin-bottom: 16px; }
         audio { width: 100%; }
+        .compare-control { margin: 10px 0 14px; }
 
         .single-preview-panel { margin-bottom: 16px; }
 
@@ -769,7 +770,7 @@
                 <h1>Resonix AI</h1>
             </div>
             <p class="brand-tag">AI Audio Restoration & Mastering Engine</p>
-            <div class="version-pill" id="version-pill">v0.9.1</div>
+            <div class="version-pill" id="version-pill">v1.0.0</div>
             <p class="subtitle">AI&#xAC00; &#xC6D0;&#xBCF8; &#xC74C;&#xC6D0;&#xC744; &#xBD84;&#xC11D;&#xD558;&#xACE0; &#xCCAD;&#xAC10; &#xBAA9;&#xD45C;&#xC5D0; &#xB9DE;&#xCDB0; &#xC2A4;&#xD14C;&#xC774;&#xC9D5;, &#xD5E4;&#xB4DC;&#xB8F8;, &#xC74C;&#xC555; &#xBC38;&#xB7F0;&#xC2A4;&#xB97C; &#xC815;&#xB9AC;&#xD569;&#xB2C8;&#xB2E4;.<br>(AI analyzes the source and restores staging, headroom, and tonal balance for your listening target.)</p>
             <div class="system-strip" aria-label="AI processing highlights">
                 <div class="system-chip">
@@ -861,14 +862,14 @@
             <h3>&#xC74C;&#xB7C9; &#xC124;&#xC815;<br>(Volume setting)</h3>
             <div class="volume-grid" role="radiogroup" aria-label="Volume setting">
                 <label class="volume-option">
-                    <input type="radio" name="volume-mode" value="target" checked>
+                    <input type="radio" name="volume-mode" value="target">
                     <span class="volume-card">
                         <strong>AI &#xBAA9;&#xD45C; &#xC74C;&#xB7C9;</strong>
                         <span class="volume-copy">(AI target loudness)<br>&#xC120;&#xD0DD;&#xD55C; &#xBAA9;&#xD45C;&#xC758; LUFS&#xB85C; &#xB9DE;&#xCD9F;&#xB2C8;&#xB2E4;.</span>
                     </span>
                 </label>
                 <label class="volume-option">
-                    <input type="radio" name="volume-mode" value="match_source">
+                    <input type="radio" name="volume-mode" value="match_source" checked>
                     <span class="volume-card">
                         <strong>&#xC6D0;&#xBCF8; &#xC74C;&#xB7C9; &#xC720;&#xC9C0;</strong>
                         <span class="volume-copy">(Match source loudness)<br>&#xC6D0;&#xBCF8;&#xACFC; &#xBE44;&#xC2B7;&#xD55C; &#xD3C9;&#xADE0; &#xC74C;&#xB7C9;&#xC73C;&#xB85C; &#xB9DE;&#xCD9F;&#xB2C8;&#xB2E4;.</span>
@@ -1040,6 +1041,13 @@
                         <span class="ab-knob" aria-hidden="true"></span>
                     </button>
                     <span class="ab-label" id="label-enhanced">ENHANCED</span>
+                </div>
+
+                <div class="checkbox-group compare-control">
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="level-match-toggle" checked>
+                        <label for="level-match-toggle">&#xACF5;&#xC815; A/B &#xBE44;&#xAD50;<br>(Level-matched A/B)</label>
+                    </div>
                 </div>
 
                 <audio id="audio-original" hidden></audio>

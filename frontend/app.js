@@ -12,6 +12,10 @@ let currentABMode = "original";
 let waveformAnimationFrame = null;
 let waveformAudioContext = null;
 let waveformResizeTimer = null;
+let levelMatchGains = {
+    original: 1,
+    enhanced: 1,
+};
 
 const waveformState = {
     original: null,
@@ -122,6 +126,7 @@ const manualDspEnable = document.getElementById("manual-dsp-enable");
 const manualDspGrid = document.getElementById("manual-dsp-grid");
 const resultZone = document.getElementById("result-zone");
 const abToggleBtn = document.getElementById("ab-toggle-btn");
+const levelMatchToggle = document.getElementById("level-match-toggle");
 const masterPlayer = document.getElementById("master-player");
 const audioOriginal = document.getElementById("audio-original");
 const audioEnhanced = document.getElementById("audio-enhanced");
@@ -219,6 +224,8 @@ function handleFileSelect(fileList) {
     enhancedAudioUrl = null;
     batchResults = [];
     currentReport = null;
+    resetLevelMatchGains();
+    applyPlaybackVolume();
     resetWaveforms();
 
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
@@ -390,6 +397,8 @@ function renderSingleResult(result, sourceFile = originalAudioBlob, sourceUrl = 
     audioOriginal.src = originalAudioUrl;
     audioEnhanced.src = enhancedAudioUrl;
     masterPlayer.src = originalAudioUrl;
+    updateLevelMatchGains(currentReport);
+    applyPlaybackVolume();
 
     downloadLink.href = result.download_url;
     downloadLink.download = result.filename || `enhanced_${originalAudioBlob.name.replace(/\.[^.]+$/, ".wav")}`;
@@ -409,6 +418,7 @@ function renderBatchResult(result) {
     currentReport = null;
     enhancedAudioUrl = null;
     batchResults = result.summary || [];
+    resetLevelMatchGains();
     masterPlayer.pause();
     masterPlayer.removeAttribute("src");
     audioOriginal.removeAttribute("src");
@@ -492,7 +502,7 @@ function getSelectedTarget() {
 
 function getSelectedVolumeMode() {
     const selectedVolume = document.querySelector('input[name="volume-mode"]:checked');
-    return selectedVolume ? selectedVolume.value : "target";
+    return selectedVolume ? selectedVolume.value : "match_source";
 }
 
 async function loadAppVersion() {
@@ -504,16 +514,70 @@ async function loadAppVersion() {
         return;
     }
     const version = await response.json();
-    versionPill.textContent = `v${version.version || "0.9.1"}`;
+    versionPill.textContent = `v${version.version || "1.0.0"}`;
     versionPill.title = version.log_dir
         ? `Logs: ${version.log_dir}`
         : "Resonix AI";
+}
+
+function resetLevelMatchGains() {
+    levelMatchGains = {
+        original: 1,
+        enhanced: 1,
+    };
+}
+
+function updateLevelMatchGains(report) {
+    const summary = report?.quality_summary || {};
+    const playbackGain = summary.level_match_playback_gain || {};
+    const originalGain = Number(playbackGain.original);
+    const enhancedGain = Number(playbackGain.enhanced);
+
+    if (Number.isFinite(originalGain) && Number.isFinite(enhancedGain)) {
+        levelMatchGains = {
+            original: clampPlaybackGain(originalGain),
+            enhanced: clampPlaybackGain(enhancedGain),
+        };
+        return;
+    }
+
+    const beforeLufs = Number(report?.before?.lufs);
+    const afterLufs = Number(report?.after?.lufs);
+    if (!Number.isFinite(beforeLufs) || !Number.isFinite(afterLufs)) {
+        resetLevelMatchGains();
+        return;
+    }
+
+    const referenceLufs = Math.min(beforeLufs, afterLufs);
+    levelMatchGains = {
+        original: clampPlaybackGain(10 ** ((referenceLufs - beforeLufs) / 20)),
+        enhanced: clampPlaybackGain(10 ** ((referenceLufs - afterLufs) / 20)),
+    };
+}
+
+function clampPlaybackGain(value) {
+    if (!Number.isFinite(value)) {
+        return 1;
+    }
+    return Math.max(0.05, Math.min(1, value));
+}
+
+function getPlaybackGain(mode) {
+    if (!levelMatchToggle || !levelMatchToggle.checked) {
+        return 1;
+    }
+    return mode === "enhanced" ? levelMatchGains.enhanced : levelMatchGains.original;
+}
+
+function applyPlaybackVolume() {
+    masterPlayer.volume = getPlaybackGain(currentABMode);
 }
 
 function renderReport(report) {
     const after = report.after;
     const recommendation = report.recommendation;
     const delta = report.delta;
+    const qualitySummary = formatQualitySummary(report);
 
     document.getElementById("metric-lufs").textContent = `${after.lufs.toFixed(1)}`;
     document.getElementById("metric-crest").textContent = `${after.crest_db.toFixed(1)}`;
@@ -543,22 +607,49 @@ function renderReport(report) {
         : "";
 
     aiFeedbackText.textContent =
-        `${targets}: ${volumeMode}. ${translateAdvice(recommendation)}. LUFS ${formatDelta(delta.lufs)} -> ${report.target_lufs.toFixed(1)}, \ub178\uc774\uc988 \ud50c\ub85c\uc5b4 (Noise floor) ${formatDelta(delta.noise_floor_db)} dB.${stereoText}${truePeakText} ${reasons}${flags}`;
+        `${qualitySummary} ${targets}: ${volumeMode}. ${translateAdvice(recommendation)}. LUFS ${formatDelta(delta.lufs)} -> ${report.target_lufs.toFixed(1)}, \ub178\uc774\uc988 \ud50c\ub85c\uc5b4 (Noise floor) ${formatDelta(delta.noise_floor_db)} dB.${stereoText}${truePeakText} ${reasons}${flags}`;
 
     renderReportDetails(report);
     aiAnalysisBox.classList.remove("hidden");
 }
 
+function formatQualitySummary(report) {
+    const summary = report.quality_summary || {};
+    const volume = summary.volume_matched
+        ? "\uc74c\ub7c9 \uc720\uc9c0 (Volume matched)"
+        : `\uc74c\ub7c9 \ucc28\uc774 ${formatDelta(summary.loudness_delta_db || 0)} dB (Level changed)`;
+    const headroom = summary.headroom_safe
+        ? "\ud5e4\ub4dc\ub8f8 \uc548\uc815 (Headroom safe)"
+        : "\ud5e4\ub4dc\ub8f8 \uc8fc\uc758 (Check headroom)";
+    const clipping = summary.clipping_safe
+        ? "\ud074\ub9ac\ud551 \uc704\ud5d8 \ub0ae\uc74c (Low clipping risk)"
+        : "\ud074\ub9ac\ud551 \uc8fc\uc758 (Clipping check)";
+    const stereo = summary.stereo_preserved
+        ? "\uc2a4\ud14c\ub808\uc624 \ubcf4\uc874 (Stereo preserved)"
+        : "\uc2a4\ud14c\ub808\uc624 \ubcc0\ud654 \uc788\uc74c (Stereo changed)";
+    return `${volume}. ${headroom}. ${clipping}. ${stereo}.`;
+}
+
 function renderReportDetails(report) {
     const before = report.before || {};
     const after = report.after || {};
+    const summary = report.quality_summary || {};
     const outputFormat = report.output_format || {};
     const steps = Array.isArray(report.applied_steps) ? report.applied_steps : [];
     const bitDepth = outputFormat.bit_depth ? `${outputFormat.bit_depth}-bit` : "24-bit";
     const sampleRate = outputFormat.sample_rate || after.sr;
     const stepText = steps.slice(0, 5).map(formatStepName).join(", ");
+    const levelGain = summary.level_match_playback_gain || {};
 
     const rows = [
+        {
+            label: "\ud488\uc9c8 \ud310\uc815 (Quality check)",
+            value: formatQualitySummary(report),
+        },
+        {
+            label: "\uacf5\uc815 A/B \uac8c\uc778 (A/B gain)",
+            value: `Original ${formatGain(levelGain.original)} / Enhanced ${formatGain(levelGain.enhanced)}`,
+        },
         {
             label: "\ucd9c\ub825 \ud3ec\ub9f7 (Output format)",
             value: `WAV ${bitDepth} / ${formatSampleRate(sampleRate)}`,
@@ -569,7 +660,7 @@ function renderReportDetails(report) {
         },
         {
             label: "\ud2b8\ub8e8 \ud53c\ud06c (True peak)",
-            value: `${formatNumber(before.true_peak_db, 1)} -> ${formatNumber(after.true_peak_db, 1)} dBTP`,
+            value: `${formatNumber(before.true_peak_db, 1)} -> ${formatNumber(after.true_peak_db, 1)} dBTP (${summary.headroom_safe ? "Safe" : "Check"})`,
         },
         {
             label: "\uc2a4\ud14c\ub808\uc624 / \uc704\uc0c1 (Stereo / phase)",
@@ -738,6 +829,11 @@ function revokeSelectedAudioUrls() {
 
 function formatNumber(value, decimals = 1) {
     return Number.isFinite(Number(value)) ? Number(value).toFixed(decimals) : "-";
+}
+
+function formatGain(value) {
+    const gain = Number(value);
+    return Number.isFinite(gain) ? `${Math.round(gain * 100)}%` : "100%";
 }
 
 function formatStepName(step) {
@@ -937,6 +1033,7 @@ async function switchAudioMode(mode, keepTime = true) {
     const isPlaying = !masterPlayer.paused;
     const currentTime = keepTime ? masterPlayer.currentTime : 0;
     setABMode(mode);
+    applyPlaybackVolume();
 
     const nextSource = mode === "enhanced" ? enhancedAudioUrl : originalAudioUrl;
     if (masterPlayer.src !== new URL(nextSource, window.location.href).href) {
@@ -1008,7 +1105,12 @@ function setABMode(mode) {
     waveformRowOriginal.classList.toggle("active", !isEnhanced);
     waveformRowEnhanced.classList.toggle("active", isEnhanced);
     nowPlayingText.textContent = isEnhanced ? text.enhanced : text.original;
+    applyPlaybackVolume();
     renderWaveforms();
+}
+
+if (levelMatchToggle) {
+    levelMatchToggle.addEventListener("change", applyPlaybackVolume);
 }
 
 waveformOriginal.addEventListener("click", (event) => {

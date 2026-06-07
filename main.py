@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "1.0.0"
 APP_HOME = os.path.join(os.path.expanduser("~"), ".packaged_audio_ai")
 LOG_DIR = os.path.join(APP_HOME, "logs")
 UPLOAD_DIR = os.path.join(APP_HOME, "temp_uploads")
@@ -1228,11 +1228,21 @@ def build_comparison_report(
     recommendation: dict[str, Any],
     steps: list[str],
 ) -> dict[str, Any]:
+    loudness_delta = after["lufs"] - before["lufs"]
+    true_peak_db = after.get("true_peak_db", -180.0)
+    clipping_ratio = after.get("clipping_ratio", 0.0)
+    stereo_delta = abs(after.get("stereo_width", 0.0) - before.get("stereo_width", 0.0))
+    phase_delta = abs(after.get("phase_correlation", 0.0) - before.get("phase_correlation", 0.0))
+    volume_matched = recommendation.get("volume_mode") == "match_source" or abs(loudness_delta) <= 1.0
+    clipping_safe = clipping_ratio <= 0.0005 and true_peak_db <= recommendation["dsp_params"]["limiter_ceiling_db"] + 0.2
+    headroom_safe = true_peak_db <= -1.0
+    stereo_preserved = after.get("channels", 1) < 2 or (stereo_delta <= 0.2 and phase_delta <= 0.25)
+
     return {
         "before": before,
         "after": after,
         "delta": {
-            "lufs": after["lufs"] - before["lufs"],
+            "lufs": loudness_delta,
             "peak_db": after["peak_db"] - before["peak_db"],
             "noise_floor_db": after["noise_floor_db"] - before["noise_floor_db"],
             "crest_db": after["crest_db"] - before["crest_db"],
@@ -1246,6 +1256,20 @@ def build_comparison_report(
         "recommendation": recommendation,
         "applied_steps": steps,
         "warnings": after.get("quality_flags", []),
+        "quality_summary": {
+            "volume_matched": volume_matched,
+            "loudness_delta_db": loudness_delta,
+            "clipping_safe": clipping_safe,
+            "headroom_safe": headroom_safe,
+            "true_peak_db": true_peak_db,
+            "stereo_preserved": stereo_preserved,
+            "stereo_width_delta": after.get("stereo_width", 0.0) - before.get("stereo_width", 0.0),
+            "phase_correlation_delta": after.get("phase_correlation", 0.0) - before.get("phase_correlation", 0.0),
+            "level_match_playback_gain": {
+                "original": min(1.0, 10 ** ((min(before["lufs"], after["lufs"]) - before["lufs"]) / 20.0)),
+                "enhanced": min(1.0, 10 ** ((min(before["lufs"], after["lufs"]) - after["lufs"]) / 20.0)),
+            },
+        },
     }
 
 
@@ -1406,7 +1430,7 @@ async def process_audio(
     target: str = Form("hifi_clean"),
     intensity: float | None = Form(None),
     use_denoise: bool = Form(True),
-    volume_mode: str = Form("target"),
+    volume_mode: str = Form("match_source"),
     dsp_params: str | None = Form(None),
     output_sample_rate: str = Form("auto"),
     output_bit_depth: str = Form("24"),
@@ -1447,7 +1471,7 @@ async def process_audio_batch(
     target: str = Form("hifi_clean"),
     intensity: float | None = Form(None),
     use_denoise: bool = Form(True),
-    volume_mode: str = Form("target"),
+    volume_mode: str = Form("match_source"),
     dsp_params: str | None = Form(None),
     output_sample_rate: str = Form("auto"),
     output_bit_depth: str = Form("24"),
