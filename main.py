@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 APP_HOME = os.path.join(os.path.expanduser("~"), ".packaged_audio_ai")
 LOG_DIR = os.path.join(APP_HOME, "logs")
 UPLOAD_DIR = os.path.join(APP_HOME, "temp_uploads")

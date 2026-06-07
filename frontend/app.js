@@ -504,7 +504,7 @@ async function loadAppVersion() {
         return;
     }
     const version = await response.json();
-    versionPill.textContent = `v${version.version || "0.9.0"}`;
+    versionPill.textContent = `v${version.version || "0.9.1"}`;
     versionPill.title = version.log_dir
         ? `Logs: ${version.log_dir}`
         : "Resonix AI";
