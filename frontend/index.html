@@ -17,6 +17,8 @@
             --accent-2: #8b5cf6;
             --accent-3: #38bdf8;
             --danger: #f472b6;
+            --warning: #fbbf24;
+            --success: #34d399;
         }
 
         * { box-sizing: border-box; }
@@ -44,6 +46,7 @@
             display: flex;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
         }
 
         .logo-wrapper svg {
@@ -98,6 +101,44 @@
             font-weight: 800;
         }
 
+        .api-status-pill {
+            display: inline-flex;
+            align-items: center;
+            min-height: 22px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(100, 116, 139, 0.36);
+            background: rgba(100, 116, 139, 0.08);
+            color: var(--muted);
+            font-size: 0.68rem;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .api-status-pill.on {
+            border-color: rgba(0, 240, 255, 0.34);
+            background: rgba(0, 240, 255, 0.08);
+            color: var(--accent);
+        }
+
+        .api-status-pill.warn {
+            border-color: rgba(245, 158, 11, 0.42);
+            background: rgba(245, 158, 11, 0.08);
+            color: var(--warning);
+        }
+
+        .settings-btn {
+            min-height: 30px;
+            padding: 0 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 240, 255, 0.28);
+            background: rgba(2, 6, 23, 0.92);
+            color: var(--accent);
+            font-size: 0.72rem;
+            font-weight: 900;
+            cursor: pointer;
+        }
+
         .system-strip {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -124,6 +165,120 @@
             color: var(--muted);
             font-size: 0.78rem;
             line-height: 1.35;
+        }
+
+        .ai-intent-panel {
+            display: grid;
+            gap: 16px;
+            overflow: hidden;
+        }
+
+        .ai-intent-header,
+        .ai-intent-grid,
+        .ai-signal {
+            display: grid;
+            gap: 12px;
+        }
+
+        .ai-intent-header {
+            grid-template-columns: 1fr auto;
+            align-items: center;
+        }
+
+        .ai-eyebrow {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--accent);
+            font-size: 0.72rem;
+            font-weight: 900;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        .ai-intent-header h2 {
+            margin: 0;
+            font-size: 1.06rem;
+        }
+
+        .ai-core-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 30px;
+            padding: 4px 10px;
+            border: 1px solid rgba(52, 211, 153, 0.3);
+            border-radius: 999px;
+            color: var(--success);
+            background: rgba(52, 211, 153, 0.08);
+            font-size: 0.74rem;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .ai-pulse {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--success);
+            box-shadow: 0 0 14px rgba(52, 211, 153, 0.65);
+            animation: aiPulse 1.6s ease-in-out infinite;
+        }
+
+        .ai-intent-grid {
+            grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr);
+            align-items: stretch;
+        }
+
+        .ai-intent-main {
+            min-height: 136px;
+            padding: 16px;
+            border: 1px solid rgba(0, 240, 255, 0.18);
+            border-radius: 8px;
+            background:
+                linear-gradient(135deg, rgba(0, 240, 255, 0.08), rgba(139, 92, 246, 0.06)),
+                rgba(3, 4, 8, 0.42);
+        }
+
+        .ai-intent-main strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 1rem;
+        }
+
+        .ai-intent-main p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.55;
+            font-size: 0.9rem;
+        }
+
+        .ai-signal-stack {
+            display: grid;
+            gap: 8px;
+        }
+
+        .ai-signal {
+            grid-template-columns: 86px minmax(0, 1fr);
+            align-items: start;
+            min-height: 40px;
+            padding: 10px 12px;
+            border: 1px solid rgba(0, 240, 255, 0.12);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.72);
+        }
+
+        .ai-signal span {
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .ai-signal strong {
+            color: var(--text);
+            font-size: 0.82rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
         }
 
         .glass-panel {
@@ -206,12 +361,41 @@
             margin-bottom: 20px;
         }
 
-        .target-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+        .target-heading {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .target-warning {
+            display: inline-flex;
+            align-items: center;
+            min-height: 24px;
+            padding: 4px 8px;
+            border: 1px solid rgba(251, 191, 36, 0.36);
+            border-radius: 999px;
+            background: rgba(251, 191, 36, 0.08);
+            color: var(--warning);
+            font-size: 0.72rem;
+            font-weight: 900;
+            line-height: 1.25;
+        }
+
+        .target-warning.hidden { display: none; }
+
+        .target-grid {
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            grid-auto-rows: 1fr;
+            align-items: stretch;
+        }
         .volume-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
         .target-option,
         .volume-option {
             position: relative;
+            display: flex;
+            min-width: 0;
         }
 
         .target-option input,
@@ -223,7 +407,10 @@
 
         .target-card,
         .volume-card {
-            display: block;
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
             min-height: 112px;
             padding: 14px;
             border: 1px solid var(--line);
@@ -245,6 +432,7 @@
         .volume-copy {
             display: block;
             font-size: 0.84rem;
+            overflow-wrap: anywhere;
         }
 
         .target-option input:checked + .target-card,
@@ -338,7 +526,11 @@
 
         .primary-btn:disabled {
             cursor: not-allowed;
-            opacity: 0.55;
+            opacity: 1;
+            color: var(--muted);
+            border: 1px solid rgba(159, 184, 207, 0.22);
+            background: rgba(15, 23, 42, 0.56);
+            box-shadow: none;
         }
 
         .spinner {
@@ -353,6 +545,11 @@
         .hidden { display: none !important; }
 
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        @keyframes aiPulse {
+            0%, 100% { opacity: 0.55; transform: scale(0.88); }
+            50% { opacity: 1; transform: scale(1); }
+        }
 
         .processing-panel {
             margin-top: 14px;
@@ -427,8 +624,9 @@
 
         .report-detail-list li {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-columns: minmax(150px, 0.36fr) minmax(0, 1fr);
             gap: 10px;
+            align-items: start;
             padding: 9px 10px;
             border: 1px solid rgba(0, 240, 255, 0.12);
             border-radius: 8px;
@@ -438,11 +636,15 @@
         .report-detail-list strong {
             color: var(--text);
             font-size: 0.82rem;
+            line-height: 1.35;
+            word-break: keep-all;
         }
 
         .report-detail-list span {
             color: var(--muted);
             font-size: 0.78rem;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
         }
 
         .processing-header {
@@ -516,6 +718,56 @@
             margin-bottom: 18px;
         }
 
+        .result-section:not(.hidden),
+        .result-dashboard {
+            display: grid;
+            grid-template-columns: minmax(0, 1.18fr) minmax(260px, 0.82fr);
+            grid-auto-flow: dense;
+            gap: 12px;
+            align-items: stretch;
+        }
+
+        .result-section .result-header {
+            grid-column: 1 / -1;
+        }
+
+        .result-card {
+            min-width: 0;
+            margin: 0;
+        }
+
+        .single-preview-panel.result-card {
+            grid-column: 1 / -1;
+            order: 1;
+            padding: 16px;
+            border: 1px solid rgba(0, 240, 255, 0.18);
+            border-radius: 8px;
+            background:
+                linear-gradient(135deg, rgba(0, 240, 255, 0.06), rgba(139, 92, 246, 0.05)),
+                rgba(3, 4, 8, 0.38);
+        }
+
+        .ai-analysis-box.result-card {
+            grid-column: span 1;
+            order: 2;
+        }
+
+        .batch-result-box.result-card {
+            grid-column: 1 / -1;
+            order: 4;
+        }
+
+        .result-download-card {
+            order: 3;
+            min-height: 100%;
+            align-self: stretch;
+            padding: 16px;
+            text-align: center;
+            background:
+                linear-gradient(135deg, rgba(0, 240, 255, 0.12), rgba(139, 92, 246, 0.09)),
+                rgba(15, 23, 42, 0.9);
+        }
+
         .status-indicator {
             width: 10px;
             height: 10px;
@@ -531,10 +783,52 @@
             background: rgba(0, 240, 255, 0.04);
         }
 
+        .ai-analysis-box h4,
+        .decision-panel h5 {
+            margin-bottom: 10px;
+        }
+
         .ai-feedback-text {
             margin-bottom: 14px;
             color: var(--muted);
             line-height: 1.5;
+            white-space: pre-line;
+        }
+
+        .decision-panel {
+            margin: 14px 0;
+            padding: 12px;
+            border: 1px solid rgba(52, 211, 153, 0.2);
+            border-radius: 8px;
+            background: rgba(52, 211, 153, 0.05);
+        }
+
+        .decision-list {
+            display: grid;
+            gap: 8px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .decision-list li {
+            display: grid;
+            grid-template-columns: 22px minmax(0, 1fr);
+            gap: 8px;
+            align-items: start;
+            color: var(--muted);
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .decision-list li::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            margin-top: 6px;
+            border-radius: 999px;
+            background: var(--success);
+            box-shadow: 0 0 12px rgba(52, 211, 153, 0.42);
         }
 
         .metrics-grid {
@@ -677,6 +971,10 @@
             background: rgba(0, 240, 255, 0.04);
         }
 
+        .result-section .result-card {
+            margin-bottom: 0;
+        }
+
         .batch-result-box h4 { margin-bottom: 8px; }
 
         .batch-zip-link { margin: 12px 0; }
@@ -732,30 +1030,134 @@
             background: rgba(15, 23, 42, 0.9);
         }
 
-        .settings-btn,
-        .settings-modal { display: none; }
+        .settings-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 40;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(2, 6, 23, 0.74);
+            backdrop-filter: blur(10px);
+        }
+
+        .settings-modal.active { display: flex; }
+
+        .settings-dialog {
+            width: min(520px, 100%);
+            display: grid;
+            gap: 12px;
+            padding: 20px;
+            border: 1px solid rgba(0, 240, 255, 0.24);
+            border-radius: 8px;
+            background: rgba(10, 15, 30, 0.98);
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+        }
+
+        .settings-dialog h3 {
+            margin: 0;
+            font-size: 1rem;
+        }
+
+        .settings-dialog p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.55;
+            font-size: 0.86rem;
+        }
+
+        .settings-modal input {
+            width: 100%;
+            min-height: 42px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 240, 255, 0.24);
+            background: rgba(15, 23, 42, 0.96);
+            color: var(--text);
+            padding: 0 12px;
+        }
+
+        .settings-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .settings-modal button {
+            min-height: 42px;
+            border-radius: 8px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(15, 23, 42, 0.96);
+            color: var(--text);
+            padding: 0 14px;
+            font-weight: 800;
+            cursor: pointer;
+        }
 
         @media (max-width: 720px) {
             body { padding: 18px 12px; }
             .upload-content,
             .system-strip,
+            .ai-intent-header,
+            .ai-intent-grid,
+            .result-dashboard,
             .checkbox-group,
-            .target-grid,
             .volume-grid,
             .metrics-grid,
             .stage-list {
                 grid-template-columns: 1fr;
             }
+            .target-grid {
+                display: flex;
+                gap: 10px;
+                margin: 0 -18px 20px;
+                padding: 0 18px 6px;
+                overflow-x: auto;
+                scroll-snap-type: x proximity;
+                grid-auto-rows: auto;
+            }
+            .target-option {
+                flex: 0 0 min(280px, 82vw);
+                scroll-snap-align: start;
+            }
+            .target-card { min-height: 120px; }
             .option-grid,
             .manual-grid {
                 grid-template-columns: 1fr;
             }
+            .settings-btn {
+                min-height: 28px;
+                padding: 0 8px;
+                font-size: 0.68rem;
+            }
+            .ai-core-status { justify-self: start; }
+            .ai-signal { grid-template-columns: 1fr; gap: 4px; }
+            .single-preview-panel.result-card,
+            .ai-analysis-box.result-card,
+            .batch-result-box.result-card {
+                grid-column: auto;
+            }
             h1 { font-size: 1.7rem; }
             .glass-panel { padding: 18px; }
             .ab-label { width: 72px; }
+            .report-detail-list li {
+                grid-template-columns: 1fr;
+                gap: 4px;
+            }
             .waveform-row {
                 grid-template-columns: 1fr;
                 gap: 8px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.001ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.001ms !important;
             }
         }
     </style>
@@ -768,6 +1170,8 @@
                     <path d="M12 2v20M17 5v14M22 10v4M7 5v14M2 10v4"></path>
                 </svg>
                 <h1>Resonix AI</h1>
+                <span class="api-status-pill" id="groq-status-pill">Groq 미설정</span>
+                <button class="settings-btn" id="settings-btn" aria-label="Groq API settings">Groq API 설정</button>
             </div>
             <p class="brand-tag">AI Audio Restoration & Mastering Engine</p>
             <div class="version-pill" id="version-pill">v1.0.0</div>
@@ -805,8 +1209,44 @@
             </div>
         </section>
 
+        <section class="glass-panel ai-intent-panel" aria-label="AI processing intent">
+            <div class="ai-intent-header">
+                <div>
+                    <span class="ai-eyebrow">AI decision layer</span>
+                    <h2>AI &#xCC98;&#xB9AC; &#xC758;&#xB3C4;<br>(AI processing intent)</h2>
+                </div>
+                <div class="ai-core-status">
+                    <span class="ai-pulse" aria-hidden="true"></span>
+                    AI &#xB300;&#xAE30; &#xC911; (Ready)
+                </div>
+            </div>
+            <div class="ai-intent-grid">
+                <div class="ai-intent-main">
+                    <strong id="ai-intent-title">&#xD558;&#xC774;&#xD30C;&#xC774; &#xD074;&#xB9B0; &#xAE30;&#xC900;&#xC73C;&#xB85C; &#xBD84;&#xC11D;</strong>
+                    <p id="ai-intent-copy">&#xD604;&#xC7AC; &#xC124;&#xC815;&#xC740; &#xC6D0;&#xBCF8; &#xC74C;&#xB7C9;&#xC744; &#xC720;&#xC9C0;&#xD558;&#xBA74;&#xC11C; &#xC2A4;&#xD14C;&#xB808;&#xC624; &#xC2A4;&#xD14C;&#xC774;&#xC9D5;&#xACFC; &#xD5E4;&#xB4DC;&#xB8F8;&#xC744; &#xC6B0;&#xC120; &#xBCF4;&#xD638;&#xD569;&#xB2C8;&#xB2E4;.</p>
+                </div>
+                <div class="ai-signal-stack">
+                    <div class="ai-signal">
+                        <span>Target</span>
+                        <strong id="ai-intent-targets">&#xD558;&#xC774;&#xD30C;&#xC774; &#xD074;&#xB9B0; (Hi-Fi Clean)</strong>
+                    </div>
+                    <div class="ai-signal">
+                        <span>Safety</span>
+                        <strong id="ai-intent-safety">&#xD5E4;&#xB4DC;&#xB8F8; &#xBCF4;&#xD638; / &#xC2A4;&#xD14C;&#xB808;&#xC624; &#xC138;&#xC774;&#xD504;</strong>
+                    </div>
+                    <div class="ai-signal">
+                        <span>Output</span>
+                        <strong id="ai-intent-output">&#xC790;&#xB3D9; &#xD3EC;&#xB9F7; / 24-bit PCM</strong>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <section class="glass-panel settings-section">
-            <h3>&#xCCAD;&#xAC10; &#xBAA9;&#xD45C;<br>(Listening target)</h3>
+            <div class="target-heading">
+                <h3>&#xCCAD;&#xAC10; &#xBAA9;&#xD45C;<br>(Listening target)</h3>
+                <span class="target-warning hidden" id="target-combo-warning">반대 성향 혼합<br>(Opposing targets)</span>
+            </div>
             <div class="target-grid" role="group" aria-label="Listening target">
                 <label class="target-option">
                     <input type="checkbox" name="target-mode" value="restore">
@@ -917,49 +1357,49 @@
 
                     <div class="checkbox-item">
                         <input type="checkbox" id="manual-dsp-enable">
-                        <label for="manual-dsp-enable">AI 추천값 대신 수동 DSP 값 사용<br>(Use manual DSP override)</label>
+                        <label for="manual-dsp-enable">청감 목표 위에 수동 DSP 보정 적용<br>(Fine-tune selected listening target)</label>
                     </div>
 
                     <div class="manual-grid manual-disabled" id="manual-dsp-grid">
                         <div class="manual-field">
-                            <label for="manual-lowcut">저역 컷 Hz<br>(Low cut)</label>
-                            <input type="range" id="manual-lowcut" min="20" max="200" step="1" value="38">
-                            <output for="manual-lowcut">38 Hz</output>
+                            <label for="manual-lowcut">저역 컷 보정 Hz<br>(Low cut offset)</label>
+                            <input type="range" id="manual-lowcut" min="-40" max="80" step="1" value="0">
+                            <output for="manual-lowcut">+0 Hz</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-low">저역 dB<br>(Low)</label>
-                            <input type="range" id="manual-low" min="-6" max="6" step="0.1" value="0.4">
-                            <output for="manual-low">+0.4 dB</output>
+                            <label for="manual-low">저역 보정 dB<br>(Low offset)</label>
+                            <input type="range" id="manual-low" min="-3" max="3" step="0.1" value="0">
+                            <output for="manual-low">+0.0 dB</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-mid">중역 dB<br>(Mid)</label>
-                            <input type="range" id="manual-mid" min="-6" max="6" step="0.1" value="0">
+                            <label for="manual-mid">중역 보정 dB<br>(Mid offset)</label>
+                            <input type="range" id="manual-mid" min="-3" max="3" step="0.1" value="0">
                             <output for="manual-mid">+0.0 dB</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-high">고역 dB<br>(High)</label>
-                            <input type="range" id="manual-high" min="-6" max="6" step="0.1" value="1.0">
-                            <output for="manual-high">+1.0 dB</output>
+                            <label for="manual-high">고역 보정 dB<br>(High offset)</label>
+                            <input type="range" id="manual-high" min="-3" max="3" step="0.1" value="0">
+                            <output for="manual-high">+0.0 dB</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-compress">컴프레션 비율<br>(Compression ratio)</label>
-                            <input type="range" id="manual-compress" min="1" max="4" step="0.05" value="1.25">
-                            <output for="manual-compress">1.25:1</output>
+                            <label for="manual-compress">컴프레션 보정<br>(Compression offset)</label>
+                            <input type="range" id="manual-compress" min="-0.5" max="1" step="0.05" value="0">
+                            <output for="manual-compress">+0.00:1</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-lufs">목표 LUFS<br>(Target LUFS)</label>
-                            <input type="range" id="manual-lufs" min="-24" max="-10" step="0.5" value="-16">
-                            <output for="manual-lufs">-16.0 LUFS</output>
+                            <label for="manual-lufs">목표 음량 보정 LUFS<br>(Target LUFS offset)</label>
+                            <input type="range" id="manual-lufs" min="-4" max="4" step="0.5" value="0">
+                            <output for="manual-lufs">+0.0 LUFS</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-exciter">익사이터<br>(Exciter)</label>
-                            <input type="range" id="manual-exciter" min="0" max="0.35" step="0.01" value="0.08">
-                            <output for="manual-exciter">0.08</output>
+                            <label for="manual-exciter">익사이터 보정<br>(Exciter offset)</label>
+                            <input type="range" id="manual-exciter" min="-0.12" max="0.12" step="0.01" value="0">
+                            <output for="manual-exciter">+0.00</output>
                         </div>
                         <div class="manual-field">
-                            <label for="manual-saturation">새추레이션<br>(Saturation)</label>
-                            <input type="range" id="manual-saturation" min="0" max="0.35" step="0.01" value="0.03">
-                            <output for="manual-saturation">0.03</output>
+                            <label for="manual-saturation">새추레이션 보정<br>(Saturation offset)</label>
+                            <input type="range" id="manual-saturation" min="-0.12" max="0.12" step="0.01" value="0">
+                            <output for="manual-saturation">+0.00</output>
                         </div>
                     </div>
                 </div>
@@ -993,7 +1433,7 @@
                 <h3>&#xCC98;&#xB9AC; &#xC644;&#xB8CC;<br>(Processing complete)</h3>
             </div>
 
-            <div class="ai-analysis-box hidden" id="ai-analysis-box">
+            <div class="ai-analysis-box result-card hidden" id="ai-analysis-box">
                 <h4>&#xBD84;&#xC11D; &#xB9AC;&#xD3EC;&#xD2B8;<br>(Analysis report)</h4>
                 <div class="ai-feedback-text" id="ai-feedback-text">&#xBD84;&#xC11D; &#xC911;... (Analyzing...)</div>
                 <div class="metrics-grid">
@@ -1018,10 +1458,14 @@
                         <div class="metric-value" id="metric-stereo">0.50</div>
                     </div>
                 </div>
+                <div class="decision-panel">
+                    <h5>AI &#xD310;&#xB2E8; &#xADFC;&#xAC70;<br>(AI decision notes)</h5>
+                    <ul class="decision-list" id="ai-decision-list"></ul>
+                </div>
                 <ul class="report-detail-list" id="report-detail-list"></ul>
             </div>
 
-            <div class="batch-result-box hidden" id="batch-result-box">
+            <div class="batch-result-box result-card hidden" id="batch-result-box">
                 <h4>&#xBC30;&#xCE58; &#xCC98;&#xB9AC; &#xC644;&#xB8CC;<br>(Batch complete)</h4>
                 <div class="ai-feedback-text" id="batch-feedback-text"></div>
                 <a id="batch-zip-link" class="secondary-btn batch-zip-link" download="ResonixAI_Batch.zip">
@@ -1030,7 +1474,7 @@
                 <ul class="batch-summary-list" id="batch-summary-list"></ul>
             </div>
 
-            <div class="single-preview-panel" id="single-preview-panel">
+            <div class="single-preview-panel result-card" id="single-preview-panel">
                 <div class="now-playing-badge" id="now-playing-badge">
                     <span id="now-playing-text">&#xC6D0;&#xBCF8; &#xC624;&#xB514;&#xC624; (Original audio)</span>
                 </div>
@@ -1075,7 +1519,7 @@
                 </div>
             </div>
 
-            <a id="download-link" class="secondary-btn" download="enhanced_audio.wav">
+            <a id="download-link" class="secondary-btn result-download-card" download="enhanced_audio.wav">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                     <polyline points="7 10 12 15 17 10"></polyline>
@@ -1087,12 +1531,30 @@
     </main>
 
     <div class="settings-modal" id="settings-modal">
-        <input type="password" id="groq-api-key">
-        <button id="modal-cancel">Cancel</button>
-        <button id="modal-save">Save</button>
+        <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="groq-settings-title">
+            <h3 id="groq-settings-title">Groq API 설정<br>(Groq API settings)</h3>
+            <p>
+                Groq API 키를 저장하면 Resonix AI의 외부 AI 연동 기능을 사용할 준비가 됩니다.<br>
+                (Save your Groq API key to prepare external AI features in Resonix AI.)
+            </p>
+            <p>
+                키는 이 브라우저의 localStorage에만 저장됩니다.<br>
+                (The key is stored only in this browser's localStorage.)
+            </p>
+            <input type="password" id="groq-api-key" placeholder="Groq API key (gsk_...)">
+            <div class="settings-actions">
+                <button id="modal-cancel">취소<br>(Cancel)</button>
+                <button id="modal-save">저장<br>(Save)</button>
+            </div>
+        </div>
     </div>
-    <button class="settings-btn" id="settings-btn" aria-label="Settings"></button>
-
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=upload-fix-20260611c"></script>
+    <script>
+        if (!window.__RESONIX_APP_LOADED__) {
+            const script = document.createElement("script");
+            script.src = "app.js?v=upload-fix-20260611c";
+            document.body.appendChild(script);
+        }
+    </script>
 </body>
 </html>

@@ -32,6 +32,7 @@ SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 OUTPUT_SAMPLE_RATES = {44100, 48000, 96000}
 OUTPUT_BIT_DEPTHS = {"16", "24"}
 FINAL_PCM_CEILING_DB = -0.3
+MANUAL_DSP_SAFE_CEILING_DB = -1.5
 ENABLE_GTCRN_MODEL = os.getenv("RESONIX_ENABLE_GTCRN", "0") == "1"
 GTCRN_MAX_MODEL_SECONDS = 8.0
 PROCESSING_TARGETS = [
@@ -356,6 +357,50 @@ def match_mid_side_balance(source_audio: np.ndarray, processed_audio: np.ndarray
     return mid_side_to_stereo(processed_mid, processed_side * side_gain)
 
 
+def lowpass_component(audio: np.ndarray, sr: int, cutoff_hz: float) -> np.ndarray:
+    if len(audio) < 16 or sr <= 0:
+        return np.zeros_like(audio, dtype=np.float32)
+
+    cutoff = float(np.clip(cutoff_hz, 20.0, sr * 0.45))
+    if cutoff >= sr * 0.49:
+        return audio.astype(np.float32)
+
+    sos = signal.butter(2, cutoff, btype="lowpass", fs=sr, output="sos")
+    try:
+        return signal.sosfiltfilt(sos, audio).astype(np.float32)
+    except ValueError:
+        return signal.sosfilt(sos, audio).astype(np.float32)
+
+
+def apply_low_bass_phase_guard(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+    cutoff_hz: float = 130.0,
+) -> tuple[np.ndarray, float]:
+    if source_audio.ndim == 1 or processed_audio.ndim == 1:
+        return processed_audio.astype(np.float32), 0.0
+    if source_audio.shape[0] != 2 or processed_audio.shape[0] != 2:
+        return processed_audio.astype(np.float32), 0.0
+
+    source_mid, source_side = stereo_to_mid_side(source_audio)
+    processed_mid, processed_side = stereo_to_mid_side(processed_audio)
+    source_low_mid = lowpass_component(source_mid, sr, cutoff_hz)
+    source_low_side = lowpass_component(source_side, sr, cutoff_hz)
+    processed_low_mid = lowpass_component(processed_mid, sr, cutoff_hz)
+    processed_low_side = lowpass_component(processed_side, sr, cutoff_hz)
+
+    source_ratio = rms(source_low_side) / (rms(source_low_mid) + 1e-9)
+    processed_ratio = rms(processed_low_side) / (rms(processed_low_mid) + 1e-9)
+    allowed_ratio = max(source_ratio * 1.25, 0.10)
+    if processed_ratio <= allowed_ratio or processed_ratio <= 1e-9:
+        return processed_audio.astype(np.float32), 0.0
+
+    low_side_gain = float(np.clip(allowed_ratio / processed_ratio, 0.35, 1.0))
+    corrected_side = processed_side - processed_low_side * (1.0 - low_side_gain)
+    return mid_side_to_stereo(processed_mid, corrected_side), db(low_side_gain)
+
+
 def resolve_output_bit_depth(bit_depth: str | None) -> str:
     value = str(bit_depth or "24").strip()
     return value if value in OUTPUT_BIT_DEPTHS else "24"
@@ -385,11 +430,23 @@ def apply_sample_peak_guard(audio: np.ndarray, ceiling_db: float = FINAL_PCM_CEI
     return (sanitized * gain).astype(np.float32), db(gain)
 
 
+def apply_tpdf_dither(audio: np.ndarray, bit_depth: str | None) -> np.ndarray:
+    if resolve_output_bit_depth(bit_depth) != "16":
+        return audio.astype(np.float32)
+
+    lsb = 1.0 / 32768.0
+    noise = (np.random.random(audio.shape) - np.random.random(audio.shape)) * lsb
+    dithered = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0) + noise
+    return np.clip(dithered, -1.0, 1.0).astype(np.float32)
+
+
 def write_audio(path: str, audio: np.ndarray, sr: int, bit_depth: str | None = "24") -> None:
     audio, _ = apply_sample_peak_guard(audio)
     subtype = None
     if os.path.splitext(path)[1].lower() == ".wav":
-        subtype = "PCM_16" if resolve_output_bit_depth(bit_depth) == "16" else "PCM_24"
+        resolved_bit_depth = resolve_output_bit_depth(bit_depth)
+        subtype = "PCM_16" if resolved_bit_depth == "16" else "PCM_24"
+        audio = apply_tpdf_dither(audio, resolved_bit_depth)
     if audio.ndim == 1:
         sf.write(path, audio, sr, subtype=subtype)
         return
@@ -398,6 +455,10 @@ def write_audio(path: str, audio: np.ndarray, sr: int, bit_depth: str | None = "
 
 def db(value: float) -> float:
     return float(20.0 * np.log10(max(float(value), 1e-9)))
+
+
+def rms(audio: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -413,6 +474,25 @@ def band_energy(spectrum_power: np.ndarray, freqs: np.ndarray, start_hz: float, 
     total = float(np.sum(spectrum_power)) or 1.0
     mask = (freqs >= start_hz) & (freqs < end_hz)
     return float(np.sum(spectrum_power[mask]) / total)
+
+
+def band_separation_score(low_energy: float, mid_energy: float, high_energy: float) -> tuple[float, dict[str, float]]:
+    total = max(float(low_energy + mid_energy + high_energy), 1e-9)
+    low = float(low_energy / total)
+    mid = float(mid_energy / total)
+    high = float(high_energy / total)
+    masking_penalty = (
+        max(0.0, low - 0.42) * 1.4
+        + max(0.0, high - 0.38) * 1.0
+        + max(0.0, 0.24 - mid) * 1.6
+    )
+    balance_penalty = (
+        abs(low - 0.30) * 0.9
+        + abs(mid - 0.42) * 0.7
+        + abs(high - 0.28) * 0.8
+    )
+    score = float(np.clip(100.0 - (masking_penalty + balance_penalty) * 100.0, 0.0, 100.0))
+    return score, {"low": low, "mid": mid, "high": high}
 
 
 def estimate_noise_floor_db(audio: np.ndarray, frame_length: int = 2048, hop_length: int = 512) -> float:
@@ -486,6 +566,7 @@ def analyze_array(audio: np.ndarray, sr: int, source_info: dict[str, Any] | None
     low_energy = band_energy(spectrum_power, freqs, 20, 250)
     mid_energy = band_energy(spectrum_power, freqs, 250, 4000)
     high_energy = band_energy(spectrum_power, freqs, 4000, min(sr / 2, 20000))
+    separation_score, band_balance = band_separation_score(low_energy, mid_energy, high_energy)
 
     centroid = spectral_centroid_from_power(spectrum_power, freqs)
     rolloff = spectral_rolloff_from_power(spectrum_power, freqs)
@@ -547,6 +628,8 @@ def analyze_array(audio: np.ndarray, sr: int, source_info: dict[str, Any] | None
         "low_energy": low_energy,
         "mid_energy": mid_energy,
         "high_energy": high_energy,
+        "band_separation_score": separation_score,
+        "band_balance": band_balance,
         "stereo_width": stereo_metrics["stereo_width"],
         "phase_correlation": stereo_metrics["phase_correlation"],
         "mid_lufs": stereo_metrics["mid_lufs"],
@@ -614,7 +697,59 @@ def parse_dsp_params(raw_params: str | None) -> dict[str, Any] | None:
         logger.warning("[WARN] Invalid dsp_params JSON: %s", raw_params)
         return None
 
-    return clamp_dsp_params(params)
+    safe_params = clamp_dsp_params(params)
+    safe_params["limiter_ceiling_db"] = min(safe_params["limiter_ceiling_db"], MANUAL_DSP_SAFE_CEILING_DB)
+    safe_params["normalize"] = True
+    return safe_params
+
+
+def apply_manual_dsp_tuning(base_params: dict[str, Any], tweaks: dict[str, Any]) -> dict[str, Any]:
+    tuned = dict(base_params)
+    tuned["lowcut_hz"] = tuned.get("lowcut_hz", 80.0) + float(np.clip(float(tweaks.get("lowcut_offset_hz", 0.0)), -80.0, 80.0))
+    tuned["low_boost_db"] = tuned.get("low_boost_db", 0.0) + float(np.clip(float(tweaks.get("low_boost_delta_db", 0.0)), -6.0, 6.0))
+    tuned["mid_cut_db"] = tuned.get("mid_cut_db", 0.0) + float(np.clip(float(tweaks.get("mid_delta_db", 0.0)), -6.0, 6.0))
+    tuned["high_boost_db"] = tuned.get("high_boost_db", 0.0) + float(np.clip(float(tweaks.get("high_boost_delta_db", 0.0)), -6.0, 6.0))
+    tuned["compress_ratio"] = tuned.get("compress_ratio", 1.0) + float(np.clip(float(tweaks.get("compress_delta", 0.0)), -1.5, 2.0))
+    tuned["target_lufs"] = tuned.get("target_lufs", -16.0) + float(np.clip(float(tweaks.get("target_lufs_delta", 0.0)), -8.0, 8.0))
+    tuned["exciter_amount"] = tuned.get("exciter_amount", 0.0) + float(np.clip(float(tweaks.get("exciter_delta", 0.0)), -0.35, 0.35))
+    tuned["saturation_amount"] = tuned.get("saturation_amount", 0.0) + float(np.clip(float(tweaks.get("saturation_delta", 0.0)), -0.35, 0.35))
+    tuned["limiter_ceiling_db"] = min(
+        float(tweaks.get("limiter_ceiling_db", tuned.get("limiter_ceiling_db", -1.5))),
+        MANUAL_DSP_SAFE_CEILING_DB,
+    )
+    tuned["normalize"] = True
+
+    safe_params = clamp_dsp_params(tuned)
+    safe_params["limiter_ceiling_db"] = min(safe_params["limiter_ceiling_db"], MANUAL_DSP_SAFE_CEILING_DB)
+    safe_params["normalize"] = True
+    return safe_params
+
+
+def parse_manual_dsp_request(raw_params: str | None, base_params: dict[str, Any]) -> dict[str, Any] | None:
+    if not raw_params:
+        return None
+
+    raw_params = raw_params.strip().lstrip("\ufeff").lstrip("챦쨩쩔").lstrip("??")
+    try:
+        params = json.loads(raw_params)
+    except json.JSONDecodeError:
+        logger.warning("[WARN] Invalid dsp_params JSON: %s", raw_params)
+        return None
+
+    delta_keys = {
+        "lowcut_offset_hz",
+        "low_boost_delta_db",
+        "mid_delta_db",
+        "high_boost_delta_db",
+        "compress_delta",
+        "target_lufs_delta",
+        "exciter_delta",
+        "saturation_delta",
+    }
+    if params.get("manual_mode") == "fine_tune" or any(key in params for key in delta_keys):
+        return apply_manual_dsp_tuning(base_params, params)
+
+    return parse_dsp_params(raw_params)
 
 
 def parse_processing_targets(target: str) -> list[str]:
@@ -872,30 +1007,194 @@ def apply_soft_highpass(audio: np.ndarray, sr: int, cutoff_hz: float) -> np.ndar
         return signal.sosfilt(sos, audio).astype(np.float32)
 
 
+def smoothstep_weight(freqs: np.ndarray, start_hz: float, end_hz: float) -> np.ndarray:
+    if end_hz <= start_hz:
+        return (freqs >= end_hz).astype(np.float64)
+    x = np.clip((freqs - start_hz) / (end_hz - start_hz), 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
 def apply_frequency_shaping(audio: np.ndarray, sr: int, params: dict[str, Any]) -> np.ndarray:
     filtered = apply_soft_highpass(audio, sr, params["lowcut_hz"])
     shaped = np.fft.rfft(filtered)
     freqs = np.fft.rfftfreq(len(filtered), 1.0 / sr)
-    gain = np.ones_like(freqs, dtype=np.float32)
 
-    gain[(freqs >= 20) & (freqs < 250)] *= 10 ** (params["low_boost_db"] / 20.0)
-    gain[(freqs >= 250) & (freqs < 4000)] *= 10 ** (params["mid_cut_db"] / 20.0)
-    gain[freqs >= 4000] *= 10 ** (params["high_boost_db"] / 20.0)
+    low_weight = 1.0 - smoothstep_weight(freqs, 180.0, 360.0)
+    high_weight = smoothstep_weight(freqs, 3200.0, 6200.0)
+    mid_weight = np.clip(1.0 - low_weight - high_weight, 0.0, 1.0)
+    total_weight = np.maximum(low_weight + mid_weight + high_weight, 1e-9)
+    gain_db = (
+        params["low_boost_db"] * low_weight
+        + params["mid_cut_db"] * mid_weight
+        + params["high_boost_db"] * high_weight
+    ) / total_weight
+    gain = np.power(10.0, gain_db / 20.0)
 
     return np.fft.irfft(shaped * gain, n=len(filtered)).astype(np.float32)
 
 
-def apply_soft_compression(audio: np.ndarray, ratio: float) -> np.ndarray:
+def spectral_band_profile(audio: np.ndarray, sr: int) -> dict[str, float]:
+    channels = as_channel_matrix(audio)
+    if channels.size == 0:
+        return {"low": 0.0, "mid": 0.0, "high": 0.0}
+    spectrum = np.abs(np.fft.rfft(channels, axis=1))
+    spectrum_power = np.mean(np.square(spectrum), axis=0)
+    freqs = np.fft.rfftfreq(channels.shape[1], 1.0 / sr)
+    low = band_energy(spectrum_power, freqs, 20.0, 250.0)
+    mid = band_energy(spectrum_power, freqs, 250.0, 4000.0)
+    high = band_energy(spectrum_power, freqs, 4000.0, min(sr / 2, 20000.0))
+    _, balance = band_separation_score(low, mid, high)
+    return balance
+
+
+def apply_band_balance_guard(source_audio: np.ndarray, processed_audio: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+    source = spectral_band_profile(source_audio, sr)
+    processed = spectral_band_profile(processed_audio, sr)
+    drift = max(
+        abs(processed["low"] - source["low"]),
+        abs(processed["mid"] - source["mid"]),
+        abs(processed["high"] - source["high"]),
+    )
+    if drift < 0.12:
+        return processed_audio.astype(np.float32), 0.0
+
+    low_db = float(np.clip((source["low"] - processed["low"]) * 7.0, -2.0, 2.0))
+    mid_db = float(np.clip((source["mid"] - processed["mid"]) * 5.0, -1.5, 1.5))
+    high_db = float(np.clip((source["high"] - processed["high"]) * 6.0, -2.0, 2.0))
+    strength = float(np.clip((drift - 0.08) / 0.20, 0.0, 0.65))
+    correction_params = {
+        "lowcut_hz": 20.0,
+        "low_boost_db": low_db * strength,
+        "mid_cut_db": mid_db * strength,
+        "high_boost_db": high_db * strength,
+    }
+
+    if processed_audio.ndim == 1:
+        guarded = apply_frequency_shaping(processed_audio, sr, correction_params)
+    else:
+        guarded = np.stack(
+            [apply_frequency_shaping(channel, sr, correction_params) for channel in processed_audio],
+            axis=0,
+        )
+    applied_db = max(
+        abs(correction_params["low_boost_db"]),
+        abs(correction_params["mid_cut_db"]),
+        abs(correction_params["high_boost_db"]),
+    )
+    return guarded.astype(np.float32), float(applied_db)
+
+
+def crest_factor_db(audio: np.ndarray) -> float:
+    channels = as_channel_matrix(audio)
+    if channels.size == 0:
+        return 0.0
+    peak = float(np.max(np.abs(channels)))
+    level = rms(channels)
+    return db(peak / max(level, 1e-9))
+
+
+def transient_mask(audio: np.ndarray, sr: int) -> np.ndarray:
+    channels = as_channel_matrix(audio)
+    if channels.size == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    mono = np.mean(channels, axis=0).astype(np.float32)
+    focused = np.abs(apply_soft_highpass(mono, sr, 120.0))
+    if focused.size == 0 or float(np.max(focused)) <= 1e-9:
+        return np.zeros_like(focused, dtype=np.float32)
+
+    fast_coeff = float(np.exp(-1.0 / max(sr * 0.003, 1.0)))
+    slow_coeff = float(np.exp(-1.0 / max(sr * 0.045, 1.0)))
+    fast = signal.lfilter([1.0 - fast_coeff], [1.0, -fast_coeff], focused)
+    slow = signal.lfilter([1.0 - slow_coeff], [1.0, -slow_coeff], focused)
+    onset = np.maximum(fast - slow, 0.0)
+    scale = float(np.percentile(onset, 98)) + 1e-9
+    return np.power(np.clip(onset / scale, 0.0, 1.0), 0.65).astype(np.float32)
+
+
+def apply_transient_preservation(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, float]:
+    source_crest = crest_factor_db(source_audio)
+    processed_crest = crest_factor_db(processed_audio)
+    crest_loss_db = source_crest - processed_crest
+    if crest_loss_db <= 1.2:
+        return processed_audio.astype(np.float32), 0.0
+
+    source_channels = as_channel_matrix(source_audio)
+    processed_channels = as_channel_matrix(processed_audio)
+    channel_count = min(source_channels.shape[0], processed_channels.shape[0])
+    sample_count = min(source_channels.shape[1], processed_channels.shape[1])
+    if channel_count <= 0 or sample_count <= 0:
+        return processed_audio.astype(np.float32), 0.0
+
+    mask = transient_mask(source_channels[:channel_count, :sample_count], sr)
+    if mask.size == 0 or float(np.max(mask)) <= 0.01:
+        return processed_audio.astype(np.float32), 0.0
+
+    strength = float(np.clip((crest_loss_db - 0.8) / 10.0, 0.0, 0.16))
+    restored = processed_channels.copy()
+    for index in range(channel_count):
+        source_transient = apply_soft_highpass(source_channels[index, :sample_count], sr, 120.0)
+        processed_transient = apply_soft_highpass(processed_channels[index, :sample_count], sr, 120.0)
+        residual = source_transient - processed_transient
+        restored[index, :sample_count] = restored[index, :sample_count] + residual * mask * strength
+
+    if processed_audio.ndim == 1:
+        return restored[0].astype(np.float32), crest_loss_db
+    return restored.astype(np.float32), crest_loss_db
+
+
+def apply_soft_compression(audio: np.ndarray, sr: int, ratio: float) -> np.ndarray:
     if ratio <= 1.01:
         return audio
 
-    threshold = 0.35
-    sign = np.sign(audio)
-    magnitude = np.abs(audio)
-    over = magnitude > threshold
-    compressed = magnitude.copy()
-    compressed[over] = threshold + (magnitude[over] - threshold) / ratio
-    return (sign * compressed).astype(np.float32)
+    threshold_db = -15.0
+    knee_db = 7.0
+    attack_seconds = 0.018
+    release_seconds = 0.16
+    block_size = max(32, int(sr * 0.004))
+    block_count = int(np.ceil(len(audio) / block_size))
+    if block_count <= 1:
+        return audio.astype(np.float32)
+
+    block_gain_db = np.zeros(block_count, dtype=np.float64)
+    for block_index in range(block_count):
+        start = block_index * block_size
+        end = min(len(audio), start + block_size)
+        block = audio[start:end]
+        level = max(
+            float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0,
+            float(np.max(np.abs(block))) * 0.55 if block.size else 0.0,
+            1e-9,
+        )
+        level_db = db(level)
+        over_db = level_db - threshold_db
+        if over_db <= -knee_db * 0.5:
+            gain_reduction_db = 0.0
+        elif over_db >= knee_db * 0.5:
+            gain_reduction_db = over_db * (1.0 - 1.0 / ratio)
+        else:
+            knee_pos = over_db + knee_db * 0.5
+            gain_reduction_db = (1.0 - 1.0 / ratio) * (knee_pos * knee_pos) / (2.0 * knee_db)
+        block_gain_db[block_index] = -min(gain_reduction_db, 7.0)
+
+    attack_coeff = float(np.exp(-block_size / max(sr * attack_seconds, 1.0)))
+    release_coeff = float(np.exp(-block_size / max(sr * release_seconds, 1.0)))
+    smoothed_gain_db = np.empty_like(block_gain_db)
+    current_gain_db = 0.0
+    for index, target_gain_db in enumerate(block_gain_db):
+        coeff = attack_coeff if target_gain_db < current_gain_db else release_coeff
+        current_gain_db = target_gain_db + (current_gain_db - target_gain_db) * coeff
+        smoothed_gain_db[index] = current_gain_db
+
+    block_positions = np.arange(block_count, dtype=np.float64) * block_size
+    sample_positions = np.arange(len(audio), dtype=np.float64)
+    gain_db = np.interp(sample_positions, block_positions, smoothed_gain_db)
+    gain = np.power(10.0, gain_db / 20.0)
+    return (audio * gain).astype(np.float32)
 
 
 def apply_spectral_gate(audio: np.ndarray, intensity: float) -> np.ndarray:
@@ -1002,19 +1301,49 @@ def apply_saturation(audio: np.ndarray, amount: float) -> np.ndarray:
     return (audio * (1.0 - amount) + saturated * amount).astype(np.float32)
 
 
+def apply_saturation_smoothing(audio: np.ndarray, sr: int, amount: float) -> np.ndarray:
+    amount = float(np.clip(amount, 0.0, 0.35))
+    if amount <= 0.03 or len(audio) < 32 or sr <= 0:
+        return audio.astype(np.float32)
+
+    cutoff = min(20000.0, sr * 0.46)
+    if cutoff >= sr * 0.49:
+        return audio.astype(np.float32)
+
+    sos = signal.butter(2, cutoff, btype="lowpass", fs=sr, output="sos")
+    try:
+        smoothed = signal.sosfiltfilt(sos, audio).astype(np.float32)
+    except ValueError:
+        smoothed = signal.sosfilt(sos, audio).astype(np.float32)
+    blend = float(np.clip(amount * 0.65, 0.0, 0.18))
+    return (audio * (1.0 - blend) + smoothed * blend).astype(np.float32)
+
+
 def apply_harmonic_exciter(audio: np.ndarray, sr: int, amount: float) -> np.ndarray:
     amount = float(np.clip(amount, 0.0, 0.35))
     if amount <= 0.0:
         return audio
 
-    window_size = max(3, int(sr / 6000))
-    if window_size % 2 == 0:
-        window_size += 1
-    kernel = np.ones(window_size, dtype=np.float32) / window_size
-    low = np.convolve(audio, kernel, mode="same")
-    high = audio - low
-    excited = np.tanh(high * 4.0) * 0.45
-    return (audio + excited * amount).astype(np.float32)
+    if len(audio) < 16 or sr <= 0:
+        return audio.astype(np.float32)
+
+    low_hz = min(3800.0, sr * 0.35)
+    high_hz = min(12000.0, sr * 0.45)
+    if high_hz <= low_hz + 200:
+        return audio.astype(np.float32)
+
+    sos = signal.butter(2, [low_hz, high_hz], btype="bandpass", fs=sr, output="sos")
+    try:
+        air_band = signal.sosfiltfilt(sos, audio).astype(np.float32)
+    except ValueError:
+        air_band = signal.sosfilt(sos, audio).astype(np.float32)
+
+    excited = np.tanh(air_band * 3.0) - air_band * 0.35
+    bright_rms = float(np.sqrt(np.mean(np.square(air_band)))) + 1e-9
+    full_rms = float(np.sqrt(np.mean(np.square(audio)))) + 1e-9
+    brightness_ratio = bright_rms / full_rms
+    de_ess = float(np.clip(0.22 / max(brightness_ratio, 1e-9), 0.45, 1.0))
+    return (audio + excited * amount * 0.55 * de_ess).astype(np.float32)
 
 
 def apply_loudness_normalize(
@@ -1082,6 +1411,90 @@ def apply_true_peak_headroom(
     return (audio * gain).astype(np.float32), gain_db, true_peak_db
 
 
+def estimate_lufs_like(audio: np.ndarray) -> float:
+    channels = as_channel_matrix(audio)
+    rms = float(np.sqrt(np.mean(np.square(channels)))) if channels.size else 0.0
+    return db(rms) - 0.691
+
+
+def apply_safe_source_loudness_match(
+    audio: np.ndarray,
+    source_audio: np.ndarray,
+    sr: int,
+    ceiling_db: float,
+    max_boost_db: float = 8.0,
+) -> tuple[np.ndarray, float, bool]:
+    source_lufs = estimate_lufs_like(source_audio)
+    current_lufs = estimate_lufs_like(audio)
+    if not np.isfinite(source_lufs) or not np.isfinite(current_lufs):
+        return audio.astype(np.float32), 0.0, False
+
+    desired_gain_db = float(np.clip(source_lufs - current_lufs, -18.0, max_boost_db))
+    if abs(desired_gain_db) < 0.05:
+        return audio.astype(np.float32), 0.0, False
+
+    ceiling = 10 ** (ceiling_db / 20.0)
+    true_peak = estimate_true_peak(audio, oversample_factor=2)
+    sample_peak = float(np.max(np.abs(as_channel_matrix(audio)))) if audio.size else 0.0
+    peak_for_cap = max(true_peak, sample_peak, 1e-9)
+    max_safe_gain_db = db(ceiling / peak_for_cap)
+    gain_db = min(desired_gain_db, max_safe_gain_db)
+    gain = 10 ** (gain_db / 20.0)
+    matched = (audio * gain).astype(np.float32)
+
+    matched = apply_soft_limiter(matched, ceiling_db, sr)
+    matched, true_peak_trim_db, _ = apply_true_peak_headroom(matched, ceiling_db)
+    matched, sample_peak_trim_db = apply_sample_peak_guard(matched)
+    total_gain_db = gain_db + true_peak_trim_db + sample_peak_trim_db
+    limited = total_gain_db < desired_gain_db - 0.1
+    return matched.astype(np.float32), total_gain_db, limited
+
+
+def finalize_output_safety(
+    audio: np.ndarray,
+    sr: int,
+    ceiling_db: float,
+    strict: bool = False,
+) -> tuple[np.ndarray, list[str]]:
+    finalized = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    steps: list[str] = []
+    ceiling = 10 ** (ceiling_db / 20.0)
+    allowed_clipping_ratio = 0.0 if strict else 0.0005
+    iteration_count = 4 if strict else 2
+
+    for _ in range(iteration_count):
+        channels = as_channel_matrix(finalized)
+        abs_audio = np.abs(channels)
+        clipping_ratio = float(np.mean(abs_audio >= 0.98)) if abs_audio.size else 0.0
+        true_peak_db = db(estimate_true_peak(finalized, oversample_factor=4))
+        sample_peak = float(np.max(abs_audio)) if abs_audio.size else 0.0
+
+        if clipping_ratio <= allowed_clipping_ratio and true_peak_db <= ceiling_db + 0.02 and sample_peak <= ceiling:
+            break
+
+        finalized = apply_soft_limiter(finalized, ceiling_db, sr)
+        finalized, true_peak_gain_db, true_peak_before_db = apply_true_peak_headroom(finalized, ceiling_db)
+        finalized, sample_peak_gain_db = apply_sample_peak_guard(finalized, ceiling_db)
+        if true_peak_gain_db < -0.01:
+            steps.append(f"post_render_true_peak_trim_{true_peak_gain_db:+.1f}db_from_{true_peak_before_db:.1f}db")
+        if sample_peak_gain_db < -0.01:
+            steps.append(f"post_render_sample_guard_{sample_peak_gain_db:+.1f}db")
+
+    channels = as_channel_matrix(finalized)
+    sample_peak = float(np.max(np.abs(channels))) if channels.size else 0.0
+    true_peak = estimate_true_peak(finalized, oversample_factor=4)
+    peak_for_cap = max(sample_peak, true_peak, 1e-9)
+    if peak_for_cap > ceiling:
+        emergency_gain = ceiling / peak_for_cap
+        finalized = (finalized * emergency_gain).astype(np.float32)
+        steps.append(f"post_render_emergency_peak_trim_{db(emergency_gain):+.1f}db")
+
+    finalized = np.clip(finalized, -ceiling, ceiling).astype(np.float32)
+    if not steps:
+        steps.append("post_render_strict_safety_verified" if strict else "post_render_safety_verified")
+    return finalized.astype(np.float32), steps
+
+
 def process_channel_stages(
     channel: np.ndarray,
     sr: int,
@@ -1115,12 +1528,14 @@ def process_channel_stages(
     steps.append("frequency_shaping")
 
     if params["compress_ratio"] > 1.01:
-        processed = apply_soft_compression(processed, params["compress_ratio"])
-        steps.append("soft_compression")
+        processed = apply_soft_compression(processed, sr, params["compress_ratio"])
+        steps.append("envelope_soft_compression")
 
     if params["saturation_amount"] > 0.0:
         processed = apply_saturation(processed, params["saturation_amount"])
         steps.append("saturation")
+        processed = apply_saturation_smoothing(processed, sr, params["saturation_amount"])
+        steps.append("saturation_alias_smoothing")
 
     if params["exciter_amount"] > 0.0:
         processed = apply_harmonic_exciter(processed, sr, params["exciter_amount"])
@@ -1138,8 +1553,12 @@ def process_audio_chain(
     mode = recommendation["mode"]
     intensity = recommendation["intensity"]
     model_denoise = bool(recommendation.get("model_denoise", True))
+    strict_safety = bool(recommendation.get("manual_dsp"))
+    limiter_ceiling_db = min(params["limiter_ceiling_db"], MANUAL_DSP_SAFE_CEILING_DB) if strict_safety else params["limiter_ceiling_db"]
     steps: list[str] = []
     was_mono = audio.ndim == 1
+    if strict_safety:
+        steps.append(f"manual_dsp_strict_ceiling_{limiter_ceiling_db:.1f}db")
 
     if not was_mono and audio.shape[0] == 2 and recommendation.get("stereo_safe", True):
         mid, side = stereo_to_mid_side(audio)
@@ -1188,6 +1607,23 @@ def process_audio_chain(
         steps.append("stereo_channel_balance_preserved")
         processed_audio = match_mid_side_balance(audio, processed_audio)
         steps.append("stereo_mid_side_balance_preserved")
+        processed_audio, low_bass_side_gain_db = apply_low_bass_phase_guard(audio, processed_audio, sr)
+        if low_bass_side_gain_db < -0.05:
+            steps.append(f"low_bass_phase_guard_{low_bass_side_gain_db:+.1f}db")
+        else:
+            steps.append("low_bass_phase_checked")
+
+    processed_audio, band_guard_db = apply_band_balance_guard(audio, processed_audio, sr)
+    if band_guard_db >= 0.05:
+        steps.append(f"source_band_balance_guard_{band_guard_db:.1f}db")
+    else:
+        steps.append("source_band_balance_checked")
+
+    processed_audio, transient_loss_db = apply_transient_preservation(audio, processed_audio, sr)
+    if transient_loss_db > 1.2:
+        steps.append(f"transient_preservation_{transient_loss_db:.1f}db")
+    else:
+        steps.append("transient_preservation_checked")
 
     output_sr = int(recommendation.get("output_sr", sr))
     if output_sr != sr:
@@ -1198,17 +1634,17 @@ def process_audio_chain(
         processed_audio, gain_db, gain_limited = apply_loudness_normalize(
             processed_audio,
             params["target_lufs"],
-            params["limiter_ceiling_db"],
+            limiter_ceiling_db,
         )
         steps.append(f"loudness_normalize_{gain_db:+.1f}db")
         if gain_limited:
             steps.append("peak_aware_gain_limited")
 
-    processed_audio = apply_soft_limiter(processed_audio, params["limiter_ceiling_db"], output_sr)
+    processed_audio = apply_soft_limiter(processed_audio, limiter_ceiling_db, output_sr)
     steps.append("linked_peak_limiter")
     processed_audio, true_peak_gain_db, true_peak_before_db = apply_true_peak_headroom(
         processed_audio,
-        params["limiter_ceiling_db"],
+        limiter_ceiling_db,
     )
     if true_peak_gain_db < -0.01:
         steps.append(f"true_peak_trim_{true_peak_gain_db:+.1f}db_from_{true_peak_before_db:.1f}db")
@@ -1218,6 +1654,28 @@ def process_audio_chain(
     processed_audio, sample_peak_gain_db = apply_sample_peak_guard(processed_audio)
     if sample_peak_gain_db < -0.01:
         steps.append(f"final_sample_peak_guard_{sample_peak_gain_db:+.1f}db")
+
+    if recommendation.get("volume_mode") == "match_source":
+        processed_audio, rematch_gain_db, rematch_limited = apply_safe_source_loudness_match(
+            processed_audio,
+            audio,
+            output_sr,
+            limiter_ceiling_db,
+        )
+        if abs(rematch_gain_db) >= 0.05:
+            steps.append(f"post_safety_source_volume_match_{rematch_gain_db:+.1f}db")
+        else:
+            steps.append("post_safety_source_volume_checked")
+        if rematch_limited:
+            steps.append("source_volume_match_limited_by_headroom")
+
+    processed_audio, final_safety_steps = finalize_output_safety(
+        processed_audio,
+        output_sr,
+        limiter_ceiling_db,
+        strict=strict_safety,
+    )
+    steps.extend(final_safety_steps)
 
     return processed_audio.astype(np.float32), output_sr, steps
 
@@ -1233,10 +1691,14 @@ def build_comparison_report(
     clipping_ratio = after.get("clipping_ratio", 0.0)
     stereo_delta = abs(after.get("stereo_width", 0.0) - before.get("stereo_width", 0.0))
     phase_delta = abs(after.get("phase_correlation", 0.0) - before.get("phase_correlation", 0.0))
-    volume_matched = recommendation.get("volume_mode") == "match_source" or abs(loudness_delta) <= 1.0
+    volume_matched = abs(loudness_delta) <= (1.25 if recommendation.get("volume_mode") == "match_source" else 1.0)
     clipping_safe = clipping_ratio <= 0.0005 and true_peak_db <= recommendation["dsp_params"]["limiter_ceiling_db"] + 0.2
     headroom_safe = true_peak_db <= -1.0
     stereo_preserved = after.get("channels", 1) < 2 or (stereo_delta <= 0.2 and phase_delta <= 0.25)
+    stereo_preservation_score = 100.0 if after.get("channels", 1) < 2 else float(
+        np.clip(100.0 - (stereo_delta * 120.0 + phase_delta * 80.0), 0.0, 100.0)
+    )
+    separation_delta = after.get("band_separation_score", 0.0) - before.get("band_separation_score", 0.0)
 
     return {
         "before": before,
@@ -1250,6 +1712,7 @@ def build_comparison_report(
             "stereo_width": after["stereo_width"] - before["stereo_width"],
             "phase_correlation": after["phase_correlation"] - before["phase_correlation"],
             "true_peak_db": after["true_peak_db"] - before["true_peak_db"],
+            "band_separation_score": separation_delta,
         },
         "target_lufs": recommendation["dsp_params"]["target_lufs"],
         "limiter_ceiling_db": recommendation["dsp_params"]["limiter_ceiling_db"],
@@ -1263,8 +1726,13 @@ def build_comparison_report(
             "headroom_safe": headroom_safe,
             "true_peak_db": true_peak_db,
             "stereo_preserved": stereo_preserved,
+            "stereo_preservation_score": stereo_preservation_score,
+            "band_separation_score": after.get("band_separation_score", 0.0),
+            "band_separation_delta": separation_delta,
             "stereo_width_delta": after.get("stereo_width", 0.0) - before.get("stereo_width", 0.0),
             "phase_correlation_delta": after.get("phase_correlation", 0.0) - before.get("phase_correlation", 0.0),
+            "post_safety_volume_match": any(step.startswith("post_safety_source_volume") for step in steps),
+            "volume_match_limited_by_headroom": "source_volume_match_limited_by_headroom" in steps,
             "level_match_playback_gain": {
                 "original": min(1.0, 10 ** ((min(before["lufs"], after["lufs"]) - before["lufs"]) / 20.0)),
                 "enhanced": min(1.0, 10 ** ((min(before["lufs"], after["lufs"]) - after["lufs"]) / 20.0)),
@@ -1315,10 +1783,13 @@ def prepare_recommendation_for_request(
             set(before.get("quality_flags", [])),
         )
 
-    override_params = parse_dsp_params(dsp_params)
+    override_params = parse_manual_dsp_request(dsp_params, recommendation["dsp_params"])
     if override_params is not None:
         recommendation["dsp_params"] = override_params
-        recommendation["advice"] = "Used caller-supplied DSP parameters."
+        recommendation["manual_dsp"] = True
+        recommendation["reasons"].append("Manual DSP fine-tuning was applied on top of the selected listening target.")
+        recommendation["reasons"].append("Manual DSP fine-tuning uses strict clipping safety.")
+        recommendation["advice"] = "Applied manual DSP fine-tuning on top of the selected listening target with strict clipping safety."
 
     return recommendation
 
@@ -1592,9 +2063,10 @@ async def enhance_audio(
             recommendation["mode"] = mode
             sync_recommendation_output_sr(recommendation, sr)
 
-        override_params = parse_dsp_params(dsp_params)
+        override_params = parse_manual_dsp_request(dsp_params, recommendation["dsp_params"])
         if override_params is not None:
             recommendation["dsp_params"] = override_params
+            recommendation["manual_dsp"] = True
 
         processed, output_sr, _ = process_audio_chain(audio, sr, recommendation)
         write_audio(output_path, processed, output_sr)
@@ -1643,6 +2115,14 @@ async def index():
     if not os.path.exists(index_path):
         raise HTTPException(status_code=404, detail="frontend/index.html was not found.")
     return FileResponse(index_path)
+
+
+@app.get("/app.js")
+async def frontend_app_js():
+    app_js_path = os.path.join(FRONTEND_DIR, "app.js")
+    if not os.path.exists(app_js_path):
+        raise HTTPException(status_code=404, detail="frontend/app.js was not found.")
+    return FileResponse(app_js_path, media_type="application/javascript")
 
 
 if __name__ == "__main__":

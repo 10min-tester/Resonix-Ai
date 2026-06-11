@@ -1,3 +1,5 @@
+window.__RESONIX_APP_LOADED__ = true;
+
 let originalAudioBlob = null;
 let originalAudioUrl = null;
 let enhancedAudioUrl = null;
@@ -21,6 +23,19 @@ const waveformState = {
     original: null,
     enhanced: null,
 };
+
+const API_ORIGIN = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+
+function apiUrl(path) {
+    return `${API_ORIGIN}${path}`;
+}
+
+function resolveApiAssetUrl(path) {
+    if (!path || /^(blob:|data:|https?:|file:)/i.test(path)) {
+        return path;
+    }
+    return path.startsWith("/api/") ? apiUrl(path) : path;
+}
 
 const text = {
     invalidFile: "\uc9c0\uc6d0\ud558\uc9c0 \uc54a\ub294 \ud30c\uc77c \ud615\uc2dd\uc785\ub2c8\ub2e4. wav, mp3, m4a, flac \ud30c\uc77c\uc744 \uc120\ud0dd\ud574 \uc8fc\uc138\uc694. (Unsupported file type.)",
@@ -118,12 +133,19 @@ const dropZone = document.getElementById("drop-zone");
 const fileInput = document.getElementById("file-input");
 const processBtn = document.getElementById("process-btn");
 const versionPill = document.getElementById("version-pill");
+const groqStatusPill = document.getElementById("groq-status-pill");
 const intensitySlider = document.getElementById("intensity-slider");
 const intensityValue = document.getElementById("intensity-value");
 const outputSampleRate = document.getElementById("output-sample-rate");
 const outputBitDepth = document.getElementById("output-bit-depth");
 const manualDspEnable = document.getElementById("manual-dsp-enable");
 const manualDspGrid = document.getElementById("manual-dsp-grid");
+const targetComboWarning = document.getElementById("target-combo-warning");
+const aiIntentTitle = document.getElementById("ai-intent-title");
+const aiIntentCopy = document.getElementById("ai-intent-copy");
+const aiIntentTargets = document.getElementById("ai-intent-targets");
+const aiIntentSafety = document.getElementById("ai-intent-safety");
+const aiIntentOutput = document.getElementById("ai-intent-output");
 const resultZone = document.getElementById("result-zone");
 const abToggleBtn = document.getElementById("ab-toggle-btn");
 const levelMatchToggle = document.getElementById("level-match-toggle");
@@ -145,6 +167,7 @@ const waveformRowOriginal = document.getElementById("waveform-row-original");
 const waveformRowEnhanced = document.getElementById("waveform-row-enhanced");
 const aiAnalysisBox = document.getElementById("ai-analysis-box");
 const aiFeedbackText = document.getElementById("ai-feedback-text");
+const aiDecisionList = document.getElementById("ai-decision-list");
 const reportDetailList = document.getElementById("report-detail-list");
 const processingPanel = document.getElementById("processing-panel");
 const processingStage = document.getElementById("processing-stage");
@@ -168,6 +191,7 @@ modalCancel.addEventListener("click", () => {
 
 modalSave.addEventListener("click", () => {
     localStorage.setItem("groq_api_key", groqApiKeyInput.value.trim());
+    updateGroqStatusPill();
     settingsModal.classList.remove("active");
 });
 
@@ -177,9 +201,44 @@ settingsModal.addEventListener("click", (event) => {
     }
 });
 
-loadAppVersion().catch(() => {});
+function updateGroqStatusPill() {
+    if (!groqStatusPill) {
+        return;
+    }
+    const key = (localStorage.getItem("groq_api_key") || "").trim();
+    groqStatusPill.classList.remove("on", "warn");
+    if (!key) {
+        groqStatusPill.textContent = "Groq 미설정";
+        groqStatusPill.title = "Groq API 키가 저장되어 있지 않습니다. Groq API 설정 버튼에서 키를 저장하세요.";
+        return;
+    }
+    if (key.startsWith("gsk_")) {
+        groqStatusPill.textContent = "Groq 활성화";
+        groqStatusPill.title = "Groq API 키가 이 브라우저에 저장되어 있습니다.";
+        groqStatusPill.classList.add("on");
+        return;
+    }
+    groqStatusPill.textContent = "Groq 확인 필요";
+    groqStatusPill.title = "저장된 키가 Groq API 키 형식(gsk_...)처럼 보이지 않습니다.";
+    groqStatusPill.classList.add("warn");
+}
 
-dropZone.addEventListener("click", () => fileInput.click());
+window.addEventListener("storage", (event) => {
+    if (event.key === "groq_api_key") {
+        updateGroqStatusPill();
+    }
+});
+
+loadAppVersion().catch(() => {});
+updateGroqStatusPill();
+
+dropZone.addEventListener("click", (event) => {
+    if (event.target === fileInput) {
+        return;
+    }
+    ensureFileInputMounted();
+    fileInput.click();
+});
 
 dropZone.addEventListener("dragover", (event) => {
     event.preventDefault();
@@ -244,6 +303,7 @@ function handleFileSelect(fileList) {
             <ul class="selected-file-list">${fileRows}${extraCount}</ul>
         </div>
     `;
+    ensureFileInputMounted();
 
     processBtn.disabled = false;
     processBtn.querySelector(".btn-text").textContent = files.length > 1 ? text.batchStart : text.start;
@@ -253,30 +313,58 @@ function handleFileSelect(fileList) {
     resetProcessingProgress();
 }
 
+function ensureFileInputMounted() {
+    if (!fileInput.isConnected || fileInput.parentElement !== dropZone) {
+        fileInput.hidden = true;
+        dropZone.prepend(fileInput);
+    }
+}
+
 intensitySlider.addEventListener("input", (event) => {
     intensityValue.textContent = `${event.target.value}%`;
+    updateAiIntentPanel();
 });
 
 const manualControls = [
-    { id: "manual-lowcut", key: "lowcut_hz", suffix: " Hz", decimals: 0 },
-    { id: "manual-low", key: "low_boost_db", suffix: " dB", decimals: 1, signed: true },
-    { id: "manual-mid", key: "mid_cut_db", suffix: " dB", decimals: 1, signed: true },
-    { id: "manual-high", key: "high_boost_db", suffix: " dB", decimals: 1, signed: true },
-    { id: "manual-compress", key: "compress_ratio", suffix: ":1", decimals: 2 },
-    { id: "manual-lufs", key: "target_lufs", suffix: " LUFS", decimals: 1 },
-    { id: "manual-exciter", key: "exciter_amount", suffix: "", decimals: 2 },
-    { id: "manual-saturation", key: "saturation_amount", suffix: "", decimals: 2 },
+    { id: "manual-lowcut", key: "lowcut_offset_hz", suffix: " Hz", decimals: 0, signed: true },
+    { id: "manual-low", key: "low_boost_delta_db", suffix: " dB", decimals: 1, signed: true },
+    { id: "manual-mid", key: "mid_delta_db", suffix: " dB", decimals: 1, signed: true },
+    { id: "manual-high", key: "high_boost_delta_db", suffix: " dB", decimals: 1, signed: true },
+    { id: "manual-compress", key: "compress_delta", suffix: ":1", decimals: 2, signed: true },
+    { id: "manual-lufs", key: "target_lufs_delta", suffix: " LUFS", decimals: 1, signed: true },
+    { id: "manual-exciter", key: "exciter_delta", suffix: "", decimals: 2, signed: true },
+    { id: "manual-saturation", key: "saturation_delta", suffix: "", decimals: 2, signed: true },
 ];
 
 manualControls.forEach((control) => {
     const input = document.getElementById(control.id);
-    input.addEventListener("input", () => updateManualControlOutput(control));
+    input.addEventListener("input", () => {
+        updateManualControlOutput(control);
+        updateAiIntentPanel();
+    });
     updateManualControlOutput(control);
 });
 
 manualDspEnable.addEventListener("change", () => {
     manualDspGrid.classList.toggle("manual-disabled", !manualDspEnable.checked);
+    updateAiIntentPanel();
 });
+
+document.querySelectorAll('input[name="target-mode"]').forEach((input) => {
+    input.addEventListener("change", () => {
+        updateTargetComboWarning();
+        updateAiIntentPanel();
+    });
+});
+updateTargetComboWarning();
+
+document.querySelectorAll('input[name="volume-mode"]').forEach((input) => {
+    input.addEventListener("change", updateAiIntentPanel);
+});
+document.getElementById("opt-denoise").addEventListener("change", updateAiIntentPanel);
+outputSampleRate.addEventListener("change", updateAiIntentPanel);
+outputBitDepth.addEventListener("change", updateAiIntentPanel);
+updateAiIntentPanel();
 
 processBtn.addEventListener("click", async () => {
     if (selectedAudioFiles.length === 0 || isProcessing) {
@@ -318,7 +406,7 @@ async function processSingleAudio() {
     const processForm = createProcessingForm();
     processForm.append("file", originalAudioBlob);
 
-    const processResponse = await fetch("/api/process", {
+    const processResponse = await fetch(apiUrl("/api/process"), {
         method: "POST",
         body: processForm,
     });
@@ -336,7 +424,7 @@ async function processBatchAudio() {
         processForm.append("files", file);
     });
 
-    const processResponse = await fetch("/api/process-batch", {
+    const processResponse = await fetch(apiUrl("/api/process-batch"), {
         method: "POST",
         body: processForm,
     });
@@ -369,7 +457,8 @@ function getManualDspParams() {
     }
 
     const params = {
-        limiter_ceiling_db: -1.0,
+        manual_mode: "fine_tune",
+        limiter_ceiling_db: -1.5,
         normalize: true,
     };
     manualControls.forEach((control) => {
@@ -383,16 +472,17 @@ function updateManualControlOutput(control) {
     const output = input.nextElementSibling;
     const value = Number(input.value);
     const formatted = control.signed
-        ? formatSigned(value)
+        ? formatSigned(value, control.decimals)
         : value.toFixed(control.decimals);
     output.textContent = `${formatted}${control.suffix}`;
 }
 
 function renderSingleResult(result, sourceFile = originalAudioBlob, sourceUrl = originalAudioUrl, options = {}) {
+    processingPanel.classList.add("hidden");
     originalAudioBlob = sourceFile;
     originalAudioUrl = sourceUrl;
     currentReport = result.report;
-    enhancedAudioUrl = result.download_url;
+    enhancedAudioUrl = resolveApiAssetUrl(result.download_url);
 
     audioOriginal.src = originalAudioUrl;
     audioEnhanced.src = enhancedAudioUrl;
@@ -400,7 +490,7 @@ function renderSingleResult(result, sourceFile = originalAudioBlob, sourceUrl = 
     updateLevelMatchGains(currentReport);
     applyPlaybackVolume();
 
-    downloadLink.href = result.download_url;
+    downloadLink.href = enhancedAudioUrl;
     downloadLink.download = result.filename || `enhanced_${originalAudioBlob.name.replace(/\.[^.]+$/, ".wav")}`;
     setDownloadLabel("\ud5a5\uc0c1\ub41c \ud30c\uc77c \ub2e4\uc6b4\ub85c\ub4dc", "Download enhanced file");
 
@@ -415,6 +505,7 @@ function renderSingleResult(result, sourceFile = originalAudioBlob, sourceUrl = 
 }
 
 function renderBatchResult(result) {
+    processingPanel.classList.add("hidden");
     currentReport = null;
     enhancedAudioUrl = null;
     batchResults = result.summary || [];
@@ -425,7 +516,7 @@ function renderBatchResult(result) {
     audioEnhanced.removeAttribute("src");
     resetWaveforms();
 
-    batchZipLink.href = result.download_url;
+    batchZipLink.href = resolveApiAssetUrl(result.download_url);
     batchZipLink.download = result.filename || "ResonixAI_Batch.zip";
 
     singlePreviewPanel.classList.add("hidden");
@@ -463,7 +554,7 @@ function selectBatchResult(index) {
 
     renderSingleResult(
         {
-            download_url: item.download_url,
+            download_url: resolveApiAssetUrl(item.download_url),
             filename: item.filename || item.archive_name,
             report: item.report,
         },
@@ -493,11 +584,103 @@ function setDownloadLabel(korean, english) {
 }
 
 function getSelectedTarget() {
-    const selectedTargets = Array.from(document.querySelectorAll('input[name="target-mode"]:checked'));
+    const selectedTargets = getSelectedTargetList();
 
     return selectedTargets.length > 0
-        ? selectedTargets.map((item) => item.value).join(",")
+        ? selectedTargets.join(",")
         : "hifi_clean";
+}
+
+function getSelectedTargetList() {
+    return Array.from(document.querySelectorAll('input[name="target-mode"]:checked'))
+        .map((item) => item.value);
+}
+
+function updateAiIntentPanel() {
+    if (!aiIntentTitle || !aiIntentCopy || !aiIntentTargets || !aiIntentSafety || !aiIntentOutput) {
+        return;
+    }
+
+    const targets = getSelectedTargetList();
+    const effectiveTargets = targets.length > 0 ? targets : ["hifi_clean"];
+    const targetText = effectiveTargets.map(translateTarget).join(" + ");
+    const amount = Number(intensitySlider.value);
+    const denoiseEnabled = document.getElementById("opt-denoise").checked;
+    const volumeMode = getSelectedVolumeMode();
+    const manualEnabled = manualDspEnable.checked;
+
+    aiIntentTitle.textContent = buildAiIntentTitle(effectiveTargets);
+    aiIntentCopy.textContent = buildAiIntentCopy(effectiveTargets, amount, volumeMode, denoiseEnabled, manualEnabled);
+    aiIntentTargets.textContent = `${targetText} / AI ${amount}%`;
+    aiIntentSafety.textContent = [
+        volumeMode === "match_source" ? "원본 음량 유지" : "AI 목표 음량",
+        "트루 피크 헤드룸",
+        "스테레오 세이프",
+        denoiseEnabled ? "노이즈 처리 사용" : "노이즈 처리 생략",
+        manualEnabled ? "수동 DSP 보정 포함" : null,
+    ].filter(Boolean).join(" / ");
+    aiIntentOutput.textContent = `${formatOutputSampleRateLabel(outputSampleRate.value)} / ${outputBitDepth.value}-bit PCM`;
+}
+
+function buildAiIntentTitle(targets) {
+    if (targets.length > 1) {
+        return "선택한 청감 목표를 혼합해 분석";
+    }
+    return {
+        restore: "원본 보존을 우선하는 복원 분석",
+        hifi_clean: "하이파이 클린 기준으로 분석",
+        hifi_bright: "디테일과 공기감을 우선하는 분석",
+        warm_analog: "밀도와 부드러움을 우선하는 분석",
+        loud_modern: "체감 음압과 에너지를 우선하는 분석",
+        bass_boost: "저역 무게감과 헤드룸을 함께 분석",
+        voice_focus: "목소리 명료도를 우선하는 분석",
+    }[targets[0]] || "AI 청감 목표 기준으로 분석";
+}
+
+function buildAiIntentCopy(targets, amount, volumeMode, denoiseEnabled, manualEnabled) {
+    const volumeText = volumeMode === "match_source"
+        ? "원본 음량을 유지"
+        : "선택한 목표의 체감 음량에 맞춤";
+    const denoiseText = denoiseEnabled
+        ? "노이즈 플로어를 함께 판단"
+        : "노이즈 제거를 생략";
+    const manualText = manualEnabled
+        ? " 수동 DSP 보정값을 최종 의도 위에 얹습니다."
+        : "";
+
+    if (targets.length > 1) {
+        return `AI 적용량 ${amount}%로 여러 청감 목표를 혼합합니다. ${volumeText}하면서 스테이징, 헤드룸, 대역 분리도를 함께 보호합니다. ${denoiseText}합니다.${manualText}`;
+    }
+    return `AI 적용량 ${amount}%로 현재 목표에 맞춰 톤, 다이내믹, 스테이징을 조정합니다. ${volumeText}하고, 트루 피크 헤드룸과 스테레오 이미지를 우선 보호합니다. ${denoiseText}합니다.${manualText}`;
+}
+
+function formatOutputSampleRateLabel(value) {
+    return {
+        auto: "자동 샘플레이트",
+        source: "원본 샘플레이트 유지",
+        "44100": "44.1 kHz",
+        "48000": "48 kHz",
+        "96000": "96 kHz",
+    }[value] || value;
+}
+
+function updateTargetComboWarning() {
+    if (!targetComboWarning) {
+        return;
+    }
+    const selected = new Set(
+        Array.from(document.querySelectorAll('input[name="target-mode"]:checked')).map((item) => item.value)
+    );
+    const opposingPairs = [
+        ["restore", "loud_modern"],
+        ["hifi_bright", "warm_analog"],
+        ["bass_boost", "voice_focus"],
+    ];
+    const hasOpposingPair = opposingPairs.some(([left, right]) => selected.has(left) && selected.has(right));
+    targetComboWarning.classList.toggle("hidden", !hasOpposingPair);
+    if (hasOpposingPair) {
+        targetComboWarning.title = "반대 성향의 청감 목표가 함께 선택되어 개성이 중화될 수 있습니다.";
+    }
 }
 
 function getSelectedVolumeMode() {
@@ -509,7 +692,7 @@ async function loadAppVersion() {
     if (!versionPill) {
         return;
     }
-    const response = await fetch("/api/version");
+    const response = await fetch(apiUrl("/api/version"));
     if (!response.ok) {
         return;
     }
@@ -589,28 +772,49 @@ function renderReport(report) {
         ? `${after.stereo_width.toFixed(2)}`
         : "-";
 
-    const reasons = recommendation.reasons.slice(0, 3).map(translateReason).join(" ");
     const flags = after.quality_flags.length > 0
-        ? ` \ub0a8\uc740 \uc8fc\uc758 \ud56d\ubaa9 (Remaining flags): ${after.quality_flags.map(translateFlag).join(", ")}.`
-        : "";
+        ? after.quality_flags.slice(0, 2).map(translateFlag).join(", ")
+        : "\ud2b9\uc774 \uc0ac\ud56d \uc5c6\uc74c (No major flags)";
     const targets = recommendation.targets
         ? recommendation.targets.map(translateTarget).join(" + ")
         : translateTarget(recommendation.target);
     const volumeMode = recommendation.volume_mode === "match_source"
         ? "\uc6d0\ubcf8 \uc74c\ub7c9 \uc720\uc9c0 (Match source)"
         : "AI \ubaa9\ud45c \uc74c\ub7c9 (AI target)";
-    const stereoText = Number.isFinite(after.stereo_width) && Number.isFinite(after.phase_correlation)
-        ? ` \uc2a4\ud14c\ub808\uc624 \ud3ed (Stereo width) ${after.stereo_width.toFixed(2)} ${formatDelta(delta.stereo_width || 0)}, \uc704\uc0c1 \uc0c1\uad00 (Phase correlation) ${after.phase_correlation.toFixed(2)} ${formatDelta(delta.phase_correlation || 0)}.`
-        : "";
-    const truePeakText = Number.isFinite(after.true_peak_db)
-        ? ` \ud2b8\ub8e8 \ud53c\ud06c (True peak) ${after.true_peak_db.toFixed(1)} dBTP ${formatDelta(delta.true_peak_db || 0)}.`
-        : "";
 
     aiFeedbackText.textContent =
-        `${qualitySummary} ${targets}: ${volumeMode}. ${translateAdvice(recommendation)}. LUFS ${formatDelta(delta.lufs)} -> ${report.target_lufs.toFixed(1)}, \ub178\uc774\uc988 \ud50c\ub85c\uc5b4 (Noise floor) ${formatDelta(delta.noise_floor_db)} dB.${stereoText}${truePeakText} ${reasons}${flags}`;
+        `\ucc98\ub9ac \uc694\uc57d (Overview): ${targets}. ${volumeMode}.\n` +
+        `${qualitySummary}\n` +
+        `LUFS ${formatDelta(delta.lufs)}, True peak ${formatNumber(after.true_peak_db, 1)} dBTP, Stereo ${formatNumber(after.stereo_width, 2)} / Phase ${formatNumber(after.phase_correlation, 2)}. ` +
+        `\uc8fc\uc758 (Flags): ${flags}.`;
 
     renderReportDetails(report);
+    renderDecisionNotes(report);
     aiAnalysisBox.classList.remove("hidden");
+}
+
+function renderDecisionNotes(report) {
+    if (!aiDecisionList) {
+        return;
+    }
+    const recommendation = report.recommendation || {};
+    const summary = report.quality_summary || {};
+    const reasons = Array.isArray(recommendation.reasons)
+        ? recommendation.reasons.slice(0, 3).map(translateReason)
+        : [];
+    const fallback = [
+        summary.headroom_safe
+            ? "트루 피크 헤드룸을 우선 보호했습니다. (Protected true-peak headroom.)"
+            : "헤드룸 주의가 필요해 출력 게인을 보수적으로 제한했습니다. (Limited output gain for headroom.)",
+        summary.stereo_preserved
+            ? "스테레오 이미지를 보존하는 방향으로 처리했습니다. (Preserved stereo image.)"
+            : "스테레오 변화가 감지되어 A/B 비교 확인이 필요합니다. (Stereo change needs A/B review.)",
+        summary.volume_matched
+            ? "원본과 가까운 청감 음량으로 맞췄습니다. (Matched source loudness.)"
+            : "선택한 AI 목표 음량에 맞춰 레벨을 조정했습니다. (Adjusted to AI target loudness.)",
+    ];
+    const notes = (reasons.length > 0 ? reasons : fallback).slice(0, 3);
+    aiDecisionList.innerHTML = notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("");
 }
 
 function formatQualitySummary(report) {
@@ -635,40 +839,25 @@ function renderReportDetails(report) {
     const after = report.after || {};
     const summary = report.quality_summary || {};
     const outputFormat = report.output_format || {};
-    const steps = Array.isArray(report.applied_steps) ? report.applied_steps : [];
     const bitDepth = outputFormat.bit_depth ? `${outputFormat.bit_depth}-bit` : "24-bit";
     const sampleRate = outputFormat.sample_rate || after.sr;
-    const stepText = steps.slice(0, 5).map(formatStepName).join(", ");
-    const levelGain = summary.level_match_playback_gain || {};
 
     const rows = [
         {
-            label: "\ud488\uc9c8 \ud310\uc815 (Quality check)",
+            label: "\ud488\uc9c8 \ud310\uc815 (Quality)",
             value: formatQualitySummary(report),
         },
         {
-            label: "\uacf5\uc815 A/B \uac8c\uc778 (A/B gain)",
-            value: `Original ${formatGain(levelGain.original)} / Enhanced ${formatGain(levelGain.enhanced)}`,
+            label: "\ud575\uc2ec \uc218\uce58 (Core)",
+            value: `LUFS ${formatNumber(before.lufs, 1)} -> ${formatNumber(after.lufs, 1)} (${formatDelta((after.lufs || 0) - (before.lufs || 0))}), True peak ${formatNumber(after.true_peak_db, 1)} dBTP`,
         },
         {
-            label: "\ucd9c\ub825 \ud3ec\ub9f7 (Output format)",
+            label: "\uacf5\uac04/\ubd84\ub9ac (Image)",
+            value: `Stereo ${formatNumber(after.stereo_width, 2)} / Phase ${formatNumber(after.phase_correlation, 2)}, Separation ${formatNumber(summary.band_separation_score, 0)} / 100`,
+        },
+        {
+            label: "\ucd9c\ub825 (Output)",
             value: `WAV ${bitDepth} / ${formatSampleRate(sampleRate)}`,
-        },
-        {
-            label: "LUFS",
-            value: `${formatNumber(before.lufs, 1)} -> ${formatNumber(after.lufs, 1)} (${formatDelta((after.lufs || 0) - (before.lufs || 0))})`,
-        },
-        {
-            label: "\ud2b8\ub8e8 \ud53c\ud06c (True peak)",
-            value: `${formatNumber(before.true_peak_db, 1)} -> ${formatNumber(after.true_peak_db, 1)} dBTP (${summary.headroom_safe ? "Safe" : "Check"})`,
-        },
-        {
-            label: "\uc2a4\ud14c\ub808\uc624 / \uc704\uc0c1 (Stereo / phase)",
-            value: `${formatNumber(after.stereo_width, 2)} / ${formatNumber(after.phase_correlation, 2)}`,
-        },
-        {
-            label: "\uc801\uc6a9 \ub2e8\uacc4 (Applied steps)",
-            value: stepText || "-",
         },
     ];
 
@@ -864,9 +1053,9 @@ function formatDelta(value) {
     return `${sign}${value.toFixed(1)}`;
 }
 
-function formatSigned(value) {
+function formatSigned(value, decimals = 1) {
     const sign = value >= 0 ? "+" : "";
-    return `${sign}${Number(value).toFixed(1)}`;
+    return `${sign}${Number(value).toFixed(decimals)}`;
 }
 
 function getWaveformAudioContext() {
