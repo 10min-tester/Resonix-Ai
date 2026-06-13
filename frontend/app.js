@@ -10,6 +10,7 @@ let isProcessing = false;
 let currentReport = null;
 let progressTimer = null;
 let progressValue = 0;
+let progressWaitTick = 0;
 let currentABMode = "original";
 let waveformAnimationFrame = null;
 let waveformAudioContext = null;
@@ -78,6 +79,33 @@ const progressStages = [
     },
 ];
 
+const stemProgressStages = [
+    {
+        at: 0,
+        text: "AI가 원본 음원을 분석하는 중... (Analyzing source audio...)",
+    },
+    {
+        at: 12,
+        text: "Demucs로 보컬과 반주를 분리하는 중... (Separating vocals and instrumental...)",
+    },
+    {
+        at: 36,
+        text: "분리된 Stem을 청감 목표에 맞게 조정하는 중... (Enhancing separated stems...)",
+    },
+    {
+        at: 64,
+        text: "Stem을 다시 합성하며 스테이징을 맞추는 중... (Remixing stems and preserving staging...)",
+    },
+    {
+        at: 88,
+        text: "최종 헤드룸과 원본 볼륨 매칭을 확인하는 중... Stem 처리는 곡 길이에 따라 오래 걸릴 수 있습니다. (Checking final headroom and source volume match...)",
+    },
+    {
+        at: 100,
+        text: "처리 완료. A/B 비교를 준비했습니다. (Processing complete.)",
+    },
+];
+
 const targetLabels = {
     restore: "\ubcf5\uc6d0 (Restore)",
     hifi_clean: "\ud558\uc774\ud30c\uc774 \ud074\ub9b0 (Hi-Fi Clean)",
@@ -127,6 +155,20 @@ const reasonLabels = new Map([
     ["Matched target loudness to the source loudness.", "\ubaa9\ud45c \uc74c\ub7c9\uc744 \uc6d0\ubcf8 \uc74c\ub7c9\uc5d0 \ub9de\ucd94\uc5c8\uc2b5\ub2c8\ub2e4. (Matched target loudness to the source loudness.)"],
     ["Skipped denoise stage by user selection.", "\uc0ac\uc6a9\uc790 \uc120\ud0dd\uc5d0 \ub530\ub77c \ub178\uc774\uc988 \uc81c\uac70 \ub2e8\uacc4\ub97c \uac74\ub108\ub6f0\uc5c8\uc2b5\ub2c8\ub2e4. (Skipped denoise stage by user selection.)"],
     ["Used fast denoise path to keep full-track processing responsive.", "\uc804\uccb4 \ud2b8\ub799 \ucc98\ub9ac \uc18d\ub3c4\ub97c \uc720\uc9c0\ud558\uae30 \uc704\ud574 \ube60\ub978 \ub178\uc774\uc988 \ucc98\ub9ac \uacbd\ub85c\ub97c \uc0ac\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Used fast denoise path to keep full-track processing responsive.)"],
+    ["Applied Demucs 2-stem separation before final remix.", "Demucs 2-stem \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 2-stem separation before final remix.)"],
+    ["Applied Demucs 2stem fast separation before final remix.", "Demucs 2-stem fast \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 2-stem fast separation.)"],
+    ["Applied Demucs 2stem balanced separation before final remix.", "Demucs 2-stem balanced \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 2-stem balanced separation.)"],
+    ["Applied Demucs 2stem precision separation before final remix.", "Demucs 2-stem precision \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 2-stem precision separation.)"],
+    ["Applied Demucs 4stem fast separation before final remix.", "Demucs 4-stem fast \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 4-stem fast separation.)"],
+    ["Applied Demucs 4stem balanced separation before final remix.", "Demucs 4-stem balanced \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 4-stem balanced separation.)"],
+    ["Applied Demucs 4stem precision separation before final remix.", "Demucs 4-stem precision \ubd84\ub9ac \ud6c4 \ucd5c\uc885 \uc7ac\ud569\uc131\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied Demucs 4-stem precision separation.)"],
+    ["Vocals used Voice Focus while instrumental used the selected listening target.", "\ubcf4\uceec\uc740 Voice Focus, \ubc18\uc8fc\ub294 \uc120\ud0dd\ud55c \uccad\uac10 \ubaa9\ud45c\ub85c \uac1c\uc120\ud588\uc2b5\ub2c8\ub2e4. (Vocals used Voice Focus while instrumental used the selected listening target.)"],
+    ["Stem processing uses conservative intensity to limit separation artifacts.", "Stem \ubd84\ub9ac artifact\ub97c \uc904\uc774\uae30 \uc704\ud574 \ubcf4\uc218\uc801\uc778 \ucc98\ub9ac \uac15\ub3c4\ub97c \uc0ac\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Stem processing uses conservative intensity.)"],
+    ["Vocal stem uses bleed-safe conservative tone shaping.", "\ubcf4\uceec stem\uc740 \uc545\uae30 \uc794\uc5ec\uc74c\uc774 \uac15\uc870\ub418\uc9c0 \uc54a\ub3c4\ub85d \ubcf4\uc218\uc801\uc73c\ub85c \ud1a4\uc744 \uc815\ub9ac\ud569\ub2c8\ub2e4. (Vocal stem uses bleed-safe tone shaping.)"],
+    ["Applied conservative vocal stem bleed cleanup.", "\ubcf4\uceec stem\uc5d0 \ub0a8\uc740 \uc545\uae30 \uc794\uc5ec\uc74c\uc744 \uc904\uc774\uae30 \uc704\ud574 \uc57d\ud55c bleed cleanup\uc744 \uc801\uc6a9\ud588\uc2b5\ub2c8\ub2e4. (Applied conservative vocal stem bleed cleanup.)"],
+    ["Preserved low-level source residual during stem remix.", "\uc6d0\ubcf8\uc758 \uc794\ud5a5\uacfc \uacf5\uac04\uac10\uc744 \uc720\uc9c0\ud558\uae30 \uc704\ud574 stem \uc7ac\ud569\uc131 \uc2dc \uc57d\ud55c residual\uc744 \ubcf4\uc874\ud588\uc2b5\ub2c8\ub2e4. (Preserved low-level source residual during stem remix.)"],
+    ["Precision stem quality failed; used balanced fallback.", "Precision stem \ud488\uc9c8 \ubaa8\ub4dc\uac00 \uc2e4\ud328\ud574 balanced \ubaa8\ub4dc\ub85c \uc790\ub3d9 \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4. (Precision stem quality failed; used balanced fallback.)"],
+    ["4-stem balanced fallback failed; used 2-stem fallback.", "4-stem balanced fallback\uc774 \uc2e4\ud328\ud574 2-stem\uc73c\ub85c \uc790\ub3d9 \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4. (Used 2-stem fallback.)"],
 ]);
 
 const dropZone = document.getElementById("drop-zone");
@@ -140,6 +182,8 @@ const outputSampleRate = document.getElementById("output-sample-rate");
 const outputBitDepth = document.getElementById("output-bit-depth");
 const manualDspEnable = document.getElementById("manual-dsp-enable");
 const manualDspGrid = document.getElementById("manual-dsp-grid");
+const stemSeparationMode = document.getElementById("opt-stem-mode");
+const stemQualityMode = document.getElementById("opt-stem-quality");
 const targetComboWarning = document.getElementById("target-combo-warning");
 const aiIntentTitle = document.getElementById("ai-intent-title");
 const aiIntentCopy = document.getElementById("ai-intent-copy");
@@ -153,6 +197,8 @@ const masterPlayer = document.getElementById("master-player");
 const audioOriginal = document.getElementById("audio-original");
 const audioEnhanced = document.getElementById("audio-enhanced");
 const downloadLink = document.getElementById("download-link");
+const stemDownloadPanel = document.getElementById("stem-download-panel");
+const stemDownloadList = document.getElementById("stem-download-list");
 const singlePreviewPanel = document.getElementById("single-preview-panel");
 const batchResultBox = document.getElementById("batch-result-box");
 const batchFeedbackText = document.getElementById("batch-feedback-text");
@@ -362,6 +408,8 @@ document.querySelectorAll('input[name="volume-mode"]').forEach((input) => {
     input.addEventListener("change", updateAiIntentPanel);
 });
 document.getElementById("opt-denoise").addEventListener("change", updateAiIntentPanel);
+stemSeparationMode.addEventListener("change", updateAiIntentPanel);
+stemQualityMode.addEventListener("change", updateAiIntentPanel);
 outputSampleRate.addEventListener("change", updateAiIntentPanel);
 outputBitDepth.addEventListener("change", updateAiIntentPanel);
 updateAiIntentPanel();
@@ -441,6 +489,8 @@ function createProcessingForm() {
     processForm.append("target", getSelectedTarget());
     processForm.append("intensity", String(Number(intensitySlider.value) / 100));
     processForm.append("use_denoise", document.getElementById("opt-denoise").checked ? "true" : "false");
+    processForm.append("stem_separation", getSelectedStemMode());
+    processForm.append("stem_quality", getSelectedStemQualityMode());
     processForm.append("volume_mode", getSelectedVolumeMode());
     processForm.append("output_sample_rate", outputSampleRate.value);
     processForm.append("output_bit_depth", outputBitDepth.value);
@@ -493,6 +543,8 @@ function renderSingleResult(result, sourceFile = originalAudioBlob, sourceUrl = 
     downloadLink.href = enhancedAudioUrl;
     downloadLink.download = result.filename || `enhanced_${originalAudioBlob.name.replace(/\.[^.]+$/, ".wav")}`;
     setDownloadLabel("\ud5a5\uc0c1\ub41c \ud30c\uc77c \ub2e4\uc6b4\ub85c\ub4dc", "Download enhanced file");
+    batchZipLink.classList.toggle("hidden", !options.keepBatchVisible);
+    renderStemDownloads(result.stem_downloads || []);
 
     singlePreviewPanel.classList.remove("hidden");
     batchResultBox.classList.toggle("hidden", !options.keepBatchVisible);
@@ -518,6 +570,7 @@ function renderBatchResult(result) {
 
     batchZipLink.href = resolveApiAssetUrl(result.download_url);
     batchZipLink.download = result.filename || "ResonixAI_Batch.zip";
+    batchZipLink.classList.remove("hidden");
 
     singlePreviewPanel.classList.add("hidden");
     aiAnalysisBox.classList.add("hidden");
@@ -556,6 +609,7 @@ function selectBatchResult(index) {
         {
             download_url: resolveApiAssetUrl(item.download_url),
             filename: item.filename || item.archive_name,
+            stem_downloads: item.stem_downloads || [],
             report: item.report,
         },
         sourceFile,
@@ -583,6 +637,33 @@ function setDownloadLabel(korean, english) {
     `;
 }
 
+function renderStemDownloads(stemDownloads) {
+    if (!stemDownloadPanel || !stemDownloadList) {
+        return;
+    }
+    if (!Array.isArray(stemDownloads) || stemDownloads.length === 0) {
+        stemDownloadPanel.classList.add("hidden");
+        stemDownloadList.innerHTML = "";
+        return;
+    }
+
+    stemDownloadList.innerHTML = stemDownloads.map((item) => {
+        const url = resolveApiAssetUrl(item.download_url);
+        const filename = item.filename || `${item.stem || "stem"}_enhanced.wav`;
+        const label = item.label || item.stem || "Stem";
+        const labelEn = item.label_en || "Stem";
+        const type = item.type === "raw" ? "raw" : "enhanced";
+        const typeLabel = type === "raw" ? "RAW" : "ENHANCED";
+        return `
+            <a class="stem-download-link" href="${escapeHtml(url)}" download="${escapeHtml(filename)}" data-type="${escapeHtml(type)}">
+                <span class="stem-download-kind">${typeLabel}</span>
+                <span class="stem-download-label">${escapeHtml(label)}<br>(${escapeHtml(labelEn)})</span>
+            </a>
+        `;
+    }).join("");
+    stemDownloadPanel.classList.remove("hidden");
+}
+
 function getSelectedTarget() {
     const selectedTargets = getSelectedTargetList();
 
@@ -606,13 +687,33 @@ function updateAiIntentPanel() {
     const targetText = effectiveTargets.map(translateTarget).join(" + ");
     const amount = Number(intensitySlider.value);
     const denoiseEnabled = document.getElementById("opt-denoise").checked;
+    const selectedStemMode = getSelectedStemMode();
+    const selectedStemQuality = getSelectedStemQualityMode();
+    const stemEnabled = selectedStemMode !== "off";
     const volumeMode = getSelectedVolumeMode();
     const manualEnabled = manualDspEnable.checked;
 
     aiIntentTitle.textContent = buildAiIntentTitle(effectiveTargets);
-    aiIntentCopy.textContent = buildAiIntentCopy(effectiveTargets, amount, volumeMode, denoiseEnabled, manualEnabled);
+    aiIntentCopy.textContent = buildAiIntentCopy(
+        effectiveTargets,
+        amount,
+        volumeMode,
+        denoiseEnabled,
+        manualEnabled,
+        selectedStemMode,
+        selectedStemQuality,
+    );
     aiIntentTargets.textContent = `${targetText} / AI ${amount}%`;
     aiIntentSafety.textContent = [
+        stemEnabled ? "2-stem 분리 처리" : null,
+        volumeMode === "match_source" ? "원본 음량 유지" : "AI 목표 음량",
+        "트루 피크 헤드룸",
+        "스테레오 세이프",
+        denoiseEnabled ? "노이즈 처리 사용" : "노이즈 처리 생략",
+        manualEnabled ? "수동 DSP 보정 포함" : null,
+    ].filter(Boolean).join(" / ");
+    aiIntentSafety.textContent = [
+        stemEnabled ? (selectedStemMode === "4stem" ? "4-stem 실험 처리" : "2-stem 분리 처리") : null,
         volumeMode === "match_source" ? "원본 음량 유지" : "AI 목표 음량",
         "트루 피크 헤드룸",
         "스테레오 세이프",
@@ -637,21 +738,24 @@ function buildAiIntentTitle(targets) {
     }[targets[0]] || "AI 청감 목표 기준으로 분석";
 }
 
-function buildAiIntentCopy(targets, amount, volumeMode, denoiseEnabled, manualEnabled) {
+function buildAiIntentCopy(targets, amount, volumeMode, denoiseEnabled, manualEnabled, stemMode = "off", stemQuality = "balanced") {
     const volumeText = volumeMode === "match_source"
         ? "원본 음량을 유지"
         : "선택한 목표의 체감 음량에 맞춤";
     const denoiseText = denoiseEnabled
         ? "노이즈 플로어를 함께 판단"
         : "노이즈 제거를 생략";
+    const stemText = stemMode !== "off"
+        ? " Demucs 2-stem 분리 후 보컬과 반주를 각각 보수적으로 개선하고 재합성합니다."
+        : "";
     const manualText = manualEnabled
         ? " 수동 DSP 보정값을 최종 의도 위에 얹습니다."
         : "";
 
     if (targets.length > 1) {
-        return `AI 적용량 ${amount}%로 여러 청감 목표를 혼합합니다. ${volumeText}하면서 스테이징, 헤드룸, 대역 분리도를 함께 보호합니다. ${denoiseText}합니다.${manualText}`;
+        return `AI 적용량 ${amount}%로 여러 청감 목표를 혼합합니다. ${volumeText}하면서 스테이징, 헤드룸, 대역 분리도를 함께 보호합니다. ${denoiseText}합니다.${stemText}${manualText}`;
     }
-    return `AI 적용량 ${amount}%로 현재 목표에 맞춰 톤, 다이내믹, 스테이징을 조정합니다. ${volumeText}하고, 트루 피크 헤드룸과 스테레오 이미지를 우선 보호합니다. ${denoiseText}합니다.${manualText}`;
+    return `AI 적용량 ${amount}%로 현재 목표에 맞춰 톤, 다이내믹, 스테이징을 조정합니다. ${volumeText}하고, 트루 피크 헤드룸과 스테레오 이미지를 우선 보호합니다. ${denoiseText}합니다.${stemText}${manualText}`;
 }
 
 function formatOutputSampleRateLabel(value) {
@@ -686,6 +790,16 @@ function updateTargetComboWarning() {
 function getSelectedVolumeMode() {
     const selectedVolume = document.querySelector('input[name="volume-mode"]:checked');
     return selectedVolume ? selectedVolume.value : "match_source";
+}
+
+function getSelectedStemMode() {
+    const mode = stemSeparationMode?.value || "off";
+    return ["off", "2stem", "4stem"].includes(mode) ? mode : "off";
+}
+
+function getSelectedStemQualityMode() {
+    const mode = stemQualityMode?.value || "balanced";
+    return ["fast", "balanced", "precision"].includes(mode) ? mode : "balanced";
 }
 
 async function loadAppVersion() {
@@ -860,6 +974,36 @@ function renderReportDetails(report) {
             value: `WAV ${bitDepth} / ${formatSampleRate(sampleRate)}`,
         },
     ];
+    if (report.stem_separation?.enabled) {
+        const bleedCleanup = report.stem_separation?.vocal_bleed_cleanup
+            ? " / 보컬 bleed cleanup 적용 (Vocal bleed cleanup)"
+            : "";
+        rows.splice(1, 0, {
+            label: "Stem \ubd84\ub9ac (Stem)",
+            value: `Demucs 2-stem: \ubcf4\uceec Voice Focus / \ubc18\uc8fc \uccad\uac10 \ubaa9\ud45c \uc801\uc6a9 (Vocals + instrumental remix)${bleedCleanup}`,
+        });
+        if (report.stem_separation?.mode === "4stem") {
+            rows[1].value = `Demucs 4-stem: 보컬 / 드럼 / 베이스 / 기타 악기 개별 처리 (Vocals + drums + bass + other)${bleedCleanup}`;
+        }
+        if (report.stem_separation?.quality_mode) {
+            rows[1].value += ` / 품질 ${report.stem_separation.quality_mode} (Quality ${report.stem_separation.quality_mode})`;
+        }
+        if (report.stem_separation?.fallback_mode) {
+            rows[1].value += ` / ${report.stem_separation.requested_mode} -> ${report.stem_separation.fallback_mode} fallback`;
+        }
+        if (report.stem_separation?.fallback_quality_mode) {
+            rows[1].value += ` / ${report.stem_separation.requested_quality_mode} -> ${report.stem_separation.fallback_quality_mode} quality fallback`;
+        }
+        if (report.stem_separation?.auto_gain_balance) {
+            rows[1].value += " / stem별 자동 gain balance";
+        }
+    }
+    if (report.quality_guard?.applied) {
+        rows.splice(2, 0, {
+            label: "AI 품질 보호 (Quality guard)",
+            value: `원본 보존 blend ${(Number(report.quality_guard.blend || 0) * 100).toFixed(0)}% / ${report.quality_guard.flags.join(", ")}`,
+        });
+    }
 
     reportDetailList.innerHTML = rows.map((row) => `
         <li>
@@ -871,10 +1015,13 @@ function renderReportDetails(report) {
 
 function startProcessingProgress() {
     clearProgressTimer();
+    progressWaitTick = 0;
     processingPanel.classList.remove("hidden");
+    processingPanel.classList.remove("is-waiting");
     setProcessingProgress(3);
     progressTimer = setInterval(() => {
         if (progressValue >= 92) {
+            refreshProcessingWaitingCopy();
             return;
         }
         const remaining = 92 - progressValue;
@@ -885,18 +1032,22 @@ function startProcessingProgress() {
 
 function completeProcessingProgress() {
     clearProgressTimer();
+    processingPanel.classList.remove("is-waiting");
     setProcessingProgress(100);
 }
 
 function failProcessingProgress() {
     clearProgressTimer();
     processingPanel.classList.remove("hidden");
+    processingPanel.classList.remove("is-waiting");
     processingStage.textContent = "\ucc98\ub9ac \uc911 \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4. (Processing failed.)";
 }
 
 function resetProcessingProgress() {
     clearProgressTimer();
     progressValue = 0;
+    progressWaitTick = 0;
+    processingPanel.classList.remove("is-waiting");
     processingPanel.classList.add("hidden");
     setProcessingProgress(0);
 }
@@ -912,19 +1063,34 @@ function setProcessingProgress(value) {
     progressValue = Math.max(0, Math.min(100, Math.round(value)));
     processingPercent.textContent = `${progressValue}%`;
     processingBar.style.width = `${progressValue}%`;
+    processingPanel.classList.toggle("is-waiting", progressValue >= 92 && progressValue < 100);
 
-    const textStageIndex = getProgressStageIndex(progressValue);
+    const activeStages = getActiveProgressStages();
+    const textStageIndex = getProgressStageIndex(progressValue, activeStages);
     const itemStageIndex = Math.min(textStageIndex, processingStageItems.length - 1);
-    processingStage.textContent = progressStages[textStageIndex].text;
+    processingStage.textContent = activeStages[textStageIndex].text;
     processingStageItems.forEach((item, index) => {
         item.classList.toggle("done", index < itemStageIndex || progressValue === 100);
         item.classList.toggle("active", index === itemStageIndex && progressValue < 100);
     });
 }
 
-function getProgressStageIndex(value) {
+function refreshProcessingWaitingCopy() {
+    progressWaitTick += 1;
+    processingPanel.classList.add("is-waiting");
+    const activeStages = getActiveProgressStages();
+    const textStageIndex = getProgressStageIndex(progressValue, activeStages);
+    const dots = ".".repeat((progressWaitTick % 3) + 1);
+    processingStage.textContent = `${activeStages[textStageIndex].text} ${dots}`;
+}
+
+function getActiveProgressStages() {
+    return getSelectedStemMode() !== "off" ? stemProgressStages : progressStages;
+}
+
+function getProgressStageIndex(value, stages = getActiveProgressStages()) {
     let activeIndex = 0;
-    progressStages.forEach((stage, index) => {
+    stages.forEach((stage, index) => {
         if (value >= stage.at) {
             activeIndex = index;
         }

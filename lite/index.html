@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#030712">
+  <title>Resonix AI Lite</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #030712;
+      --surface: #07111f;
+      --panel: #0b1424;
+      --panel-2: #101b2d;
+      --line: rgba(0, 210, 255, 0.22);
+      --line-strong: rgba(0, 210, 255, 0.38);
+      --text: #eff8ff;
+      --muted: #a7bed2;
+      --dim: #7892a8;
+      --accent: #00d2ff;
+      --accent-2: #7c5cff;
+      --success: #40d99b;
+      --warning: #f4c95d;
+      --danger: #ff6b9c;
+      --radius: 10px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(0, 210, 255, 0.12), transparent 32%),
+        radial-gradient(circle at 95% 12%, rgba(124, 92, 255, 0.12), transparent 34%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input, select {
+      font: inherit;
+    }
+
+    button, select, input[type="range"] {
+      color: var(--text);
+    }
+
+    a { color: inherit; }
+
+    .shell {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 0 18px;
+    }
+
+    .brand {
+      display: grid;
+      gap: 6px;
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      color: var(--accent);
+      background: rgba(0, 210, 255, 0.08);
+      font-weight: 900;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.45rem;
+      line-height: 1.1;
+    }
+
+    .subtitle {
+      max-width: 62ch;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 0.92rem;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid rgba(64, 217, 155, 0.28);
+      border-radius: 999px;
+      color: var(--success);
+      background: rgba(64, 217, 155, 0.08);
+      font-size: 0.78rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent),
+        rgba(7, 17, 31, 0.94);
+      padding: 14px;
+    }
+
+    .panel h2,
+    .panel h3 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      line-height: 1.35;
+    }
+
+    .dropzone {
+      display: grid;
+      gap: 10px;
+      place-items: center;
+      min-height: 184px;
+      padding: 18px;
+      border: 1px dashed rgba(0, 210, 255, 0.45);
+      border-radius: var(--radius);
+      background: rgba(0, 210, 255, 0.05);
+      text-align: center;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+
+    .dropzone.is-dragging {
+      border-color: var(--accent);
+      background: rgba(0, 210, 255, 0.10);
+    }
+
+    .drop-icon {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      border: 1px solid var(--line-strong);
+      color: var(--accent);
+      background: rgba(0, 210, 255, 0.08);
+    }
+
+    .file-input {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .primary-btn,
+    .secondary-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 14px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      font-weight: 850;
+      text-decoration: none;
+      cursor: pointer;
+      transition: transform 150ms ease, background 150ms ease, border-color 150ms ease;
+    }
+
+    .primary-btn {
+      background: linear-gradient(135deg, var(--accent), #5ee7ff);
+      color: #00131a;
+    }
+
+    .secondary-btn {
+      border-color: var(--line-strong);
+      background: rgba(0, 210, 255, 0.07);
+      color: var(--text);
+    }
+
+    .primary-btn:disabled,
+    .secondary-btn:disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .primary-btn:not(:disabled):active,
+    .secondary-btn:not(:disabled):active {
+      transform: translateY(1px);
+    }
+
+    .control-grid {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 7px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    select {
+      width: 100%;
+      min-height: 42px;
+      padding: 0 12px;
+      border: 1px solid rgba(167, 190, 210, 0.28);
+      border-radius: 8px;
+      background: var(--panel-2);
+      color: var(--text);
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px;
+      border: 1px solid rgba(167, 190, 210, 0.18);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .toggle span {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .toggle input {
+      width: 20px;
+      height: 20px;
+      accent-color: var(--accent);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .meter-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      min-height: 72px;
+      padding: 10px;
+      border: 1px solid rgba(167, 190, 210, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.026);
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.74rem;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 7px;
+      font-size: 1.12rem;
+    }
+
+    .players {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .player-card {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid rgba(167, 190, 210, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .player-card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0;
+    }
+
+    .player-card strong {
+      font-size: 0.9rem;
+    }
+
+    .player-card span {
+      color: var(--dim);
+      font-size: 0.76rem;
+      font-weight: 800;
+    }
+
+    audio {
+      width: 100%;
+      min-height: 42px;
+    }
+
+    .progress-wrap {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .progress-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-weight: 800;
+    }
+
+    .bar {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(167, 190, 210, 0.16);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 180ms ease;
+    }
+
+    .report {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+
+    .report-item {
+      padding: 10px;
+      border: 1px solid rgba(167, 190, 210, 0.14);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.022);
+    }
+
+    .download-card {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+      padding: 12px;
+      border: 1px solid rgba(0, 210, 255, 0.34);
+      border-radius: var(--radius);
+      background: rgba(0, 210, 255, 0.07);
+    }
+
+    .download-card.hidden,
+    .hidden {
+      display: none !important;
+    }
+
+    .small-note {
+      margin: 10px 0 0;
+      color: var(--dim);
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 820px) {
+      .shell { padding: 14px; }
+      .topbar { display: grid; }
+      .grid { grid-template-columns: 1fr; }
+      .meter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .actions > * { flex: 1 1 160px; }
+    }
+
+    @media (max-width: 460px) {
+      .meter-grid { grid-template-columns: 1fr; }
+      h1 { font-size: 1.25rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="mark">R</div>
+          <div>
+            <h1>Resonix AI Lite</h1>
+            <p class="subtitle">모바일 즉석 보정<br>(Mobile quick mastering)</p>
+          </div>
+        </div>
+        <p class="subtitle">Stem 분리 없이 브라우저 안에서 톤, 음량, 헤드룸을 빠르게 정리합니다.<br>(Runs locally in your browser without stem separation.)</p>
+      </div>
+      <span class="status-chip">Offline-ready / No upload</span>
+    </section>
+
+    <section class="grid">
+      <section class="panel">
+        <h2>음원 선택<br>(Load audio)</h2>
+        <label class="dropzone" id="dropzone" for="file-input">
+          <span class="drop-icon">↧</span>
+          <strong id="file-title">오디오 파일 선택<br>(Choose an audio file)</strong>
+          <span class="subtitle">WAV, MP3, M4A, FLAC. 처리 가능한 용량은 기기 성능에 따라 달라집니다.<br>(Large files depend on your phone memory.)</span>
+        </label>
+        <input class="file-input" id="file-input" type="file" accept="audio/*">
+
+        <div class="control-grid">
+          <div class="field">
+            <label for="target">청감 목표<br>(Listening target)</label>
+            <select id="target">
+              <option value="hifi_clean">하이파이 클린 (Hi-Fi Clean)</option>
+              <option value="restore">복원 (Restore)</option>
+              <option value="hifi_bright">하이파이 브라이트 (Hi-Fi Bright)</option>
+              <option value="warm_analog">웜 아날로그 (Warm Analog)</option>
+              <option value="loud_modern">라우드 모던 (Loud Modern)</option>
+              <option value="bass_boost">저음 보강 (Bass Boost)</option>
+              <option value="voice_focus">보이스 포커스 (Voice Focus)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="amount">AI 적용량 <span id="amount-value">60%</span><br>(AI amount)</label>
+            <input id="amount" type="range" min="0" max="100" value="60">
+          </div>
+
+          <label class="toggle" for="match-volume">
+            <span>원본 볼륨 유지<br>(Match source volume)</span>
+            <input id="match-volume" type="checkbox" checked>
+          </label>
+
+          <label class="toggle" for="safe-limiter">
+            <span>클리핑 방지 리미터<br>(Safe limiter)</span>
+            <input id="safe-limiter" type="checkbox" checked>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button class="primary-btn" id="process-btn" disabled>개선 시작<br>(Enhance)</button>
+          <button class="secondary-btn" id="reset-btn" type="button">초기화<br>(Reset)</button>
+        </div>
+
+        <div class="progress-wrap hidden" id="progress-wrap">
+          <div class="progress-row">
+            <span id="progress-text">대기 중 (Ready)</span>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+        </div>
+
+        <p class="small-note">Lite는 Demucs/stem/ONNX를 사용하지 않습니다. Desktop 버전 대비 빠르고 가볍지만 복원 성능은 제한됩니다.<br>(Lite does not use Demucs, stem separation, or ONNX models.)</p>
+      </section>
+
+      <section class="panel">
+        <h2>분석 및 비교<br>(Analysis & A/B)</h2>
+        <div class="meter-grid">
+          <div class="metric"><span>LUFS 추정<br>(Estimated)</span><strong id="metric-lufs">--</strong></div>
+          <div class="metric"><span>Peak dBFS</span><strong id="metric-peak">--</strong></div>
+          <div class="metric"><span>Crest dB</span><strong id="metric-crest">--</strong></div>
+          <div class="metric"><span>Stereo width</span><strong id="metric-width">--</strong></div>
+        </div>
+
+        <div class="players">
+          <div class="player-card">
+            <header><strong>원본<br>(Original)</strong><span id="original-tag">No file</span></header>
+            <audio id="original-player" controls></audio>
+          </div>
+          <div class="player-card">
+            <header><strong>개선<br>(Enhanced)</strong><span id="enhanced-tag">Not processed</span></header>
+            <audio id="enhanced-player" controls></audio>
+          </div>
+        </div>
+
+        <div class="report" id="report"></div>
+
+        <div class="download-card hidden" id="download-card">
+          <strong>개선 파일 다운로드<br>(Download enhanced file)</strong>
+          <a class="primary-btn" id="download-link" download="resonix_lite_enhanced.wav">WAV 다운로드<br>(Download WAV)</a>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const profiles = {
+      restore: { lowcut: 35, low: 0.0, mid: 0.0, high: 0.6, ratio: 1.18, target: -18.0, drive: 0.015 },
+      hifi_clean: { lowcut: 38, low: 0.4, mid: 0.0, high: 1.0, ratio: 1.22, target: -16.0, drive: 0.025 },
+      hifi_bright: { lowcut: 40, low: 0.0, mid: -0.5, high: 2.2, ratio: 1.22, target: -15.0, drive: 0.02 },
+      warm_analog: { lowcut: 35, low: 1.4, mid: 0.0, high: -0.7, ratio: 1.35, target: -17.0, drive: 0.09 },
+      loud_modern: { lowcut: 38, low: 0.8, mid: -0.2, high: 1.4, ratio: 2.2, target: -12.5, drive: 0.07 },
+      bass_boost: { lowcut: 30, low: 2.3, mid: -0.3, high: 0.2, ratio: 1.55, target: -15.0, drive: 0.055 },
+      voice_focus: { lowcut: 105, low: -1.2, mid: 0.8, high: 1.5, ratio: 1.65, target: -16.0, drive: 0.02 }
+    };
+
+    const els = {
+      dropzone: document.getElementById("dropzone"),
+      fileInput: document.getElementById("file-input"),
+      fileTitle: document.getElementById("file-title"),
+      target: document.getElementById("target"),
+      amount: document.getElementById("amount"),
+      amountValue: document.getElementById("amount-value"),
+      matchVolume: document.getElementById("match-volume"),
+      safeLimiter: document.getElementById("safe-limiter"),
+      processBtn: document.getElementById("process-btn"),
+      resetBtn: document.getElementById("reset-btn"),
+      progressWrap: document.getElementById("progress-wrap"),
+      progressText: document.getElementById("progress-text"),
+      progressPercent: document.getElementById("progress-percent"),
+      barFill: document.getElementById("bar-fill"),
+      originalPlayer: document.getElementById("original-player"),
+      enhancedPlayer: document.getElementById("enhanced-player"),
+      originalTag: document.getElementById("original-tag"),
+      enhancedTag: document.getElementById("enhanced-tag"),
+      metricLufs: document.getElementById("metric-lufs"),
+      metricPeak: document.getElementById("metric-peak"),
+      metricCrest: document.getElementById("metric-crest"),
+      metricWidth: document.getElementById("metric-width"),
+      report: document.getElementById("report"),
+      downloadCard: document.getElementById("download-card"),
+      downloadLink: document.getElementById("download-link")
+    };
+
+    let sourceFile = null;
+    let sourceBuffer = null;
+    let sourceUrl = null;
+    let enhancedUrl = null;
+    let sourceAnalysis = null;
+
+    els.amount.addEventListener("input", () => {
+      els.amountValue.textContent = `${els.amount.value}%`;
+    });
+
+    els.fileInput.addEventListener("change", () => {
+      if (els.fileInput.files[0]) loadFile(els.fileInput.files[0]);
+    });
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+      els.dropzone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        els.dropzone.classList.add("is-dragging");
+      });
+    });
+
+    ["dragleave", "drop"].forEach((eventName) => {
+      els.dropzone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        els.dropzone.classList.remove("is-dragging");
+      });
+    });
+
+    els.dropzone.addEventListener("drop", (event) => {
+      const file = event.dataTransfer.files[0];
+      if (file) loadFile(file);
+    });
+
+    els.processBtn.addEventListener("click", processAudio);
+    els.resetBtn.addEventListener("click", resetApp);
+
+    async function loadFile(file) {
+      revokeEnhanced();
+      sourceFile = file;
+      setProgress(8, "파일 분석 중 (Analyzing file)");
+      els.progressWrap.classList.remove("hidden");
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const context = new AudioContext();
+        sourceBuffer = await context.decodeAudioData(arrayBuffer.slice(0));
+        await context.close();
+        if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+        sourceUrl = URL.createObjectURL(file);
+        els.originalPlayer.src = sourceUrl;
+        els.fileTitle.textContent = file.name;
+        els.originalTag.textContent = formatDuration(sourceBuffer.duration);
+        sourceAnalysis = analyzeBuffer(sourceBuffer);
+        renderMetrics(sourceAnalysis);
+        renderReport([`원본 분석 완료. ${formatChannels(sourceBuffer)} / ${sourceBuffer.sampleRate} Hz`, "Lite 처리 준비 완료. Desktop stem 복원보다 가볍고 빠른 경로입니다."]);
+        els.processBtn.disabled = false;
+        setProgress(100, "분석 완료 (Analysis complete)");
+        setTimeout(() => els.progressWrap.classList.add("hidden"), 500);
+      } catch (error) {
+        renderReport([`파일을 열 수 없습니다. ${error.message}`]);
+        setProgress(0, "오류 (Error)");
+      }
+    }
+
+    async function processAudio() {
+      if (!sourceBuffer || !sourceAnalysis) return;
+      els.processBtn.disabled = true;
+      els.progressWrap.classList.remove("hidden");
+      setProgress(12, "청감 목표 적용 중 (Applying target)");
+
+      try {
+        await waitFrame();
+        const target = els.target.value;
+        const profile = profiles[target] || profiles.hifi_clean;
+        const amount = Number(els.amount.value) / 100;
+        const rendered = await renderWithProfile(sourceBuffer, profile, amount);
+        setProgress(68, "볼륨과 헤드룸 정리 중 (Matching level and headroom)");
+        await waitFrame();
+
+        const processed = bufferToPlanar(rendered);
+        const targetLufs = els.matchVolume.checked ? sourceAnalysis.lufs : profile.target;
+        const gainInfo = applyGainAndLimiter(processed, rendered.sampleRate, targetLufs, els.safeLimiter.checked);
+        const enhancedBuffer = planarToAudioBuffer(processed, rendered.sampleRate);
+        const enhancedAnalysis = analyzePlanar(processed, rendered.sampleRate);
+        const wav = encodeWav(processed, rendered.sampleRate);
+        revokeEnhanced();
+        enhancedUrl = URL.createObjectURL(wav);
+        els.enhancedPlayer.src = enhancedUrl;
+        els.downloadLink.href = enhancedUrl;
+        els.downloadLink.download = `lite_enhanced_${safeName(sourceFile.name).replace(/\.[^.]+$/, "")}.wav`;
+        els.downloadCard.classList.remove("hidden");
+        els.enhancedTag.textContent = `${enhancedAnalysis.lufs.toFixed(1)} LUFS`;
+        renderMetrics(enhancedAnalysis);
+        renderReport(buildProcessingReport(sourceAnalysis, enhancedAnalysis, profile, amount, gainInfo));
+        setProgress(100, "처리 완료 (Processing complete)");
+      } catch (error) {
+        renderReport([`처리 중 오류가 발생했습니다. ${error.message}`]);
+        setProgress(0, "오류 (Error)");
+      } finally {
+        els.processBtn.disabled = false;
+      }
+    }
+
+    async function renderWithProfile(buffer, profile, amount) {
+      const context = new OfflineAudioContext(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+
+      const highpass = new BiquadFilterNode(context, { type: "highpass", frequency: 20 + (profile.lowcut - 20) * amount, Q: 0.55 });
+      const lowShelf = new BiquadFilterNode(context, { type: "lowshelf", frequency: 130, gain: profile.low * amount });
+      const mid = new BiquadFilterNode(context, { type: "peaking", frequency: 950, Q: 0.8, gain: profile.mid * amount });
+      const highShelf = new BiquadFilterNode(context, { type: "highshelf", frequency: 4200, gain: profile.high * amount });
+      const compressor = new DynamicsCompressorNode(context, {
+        threshold: -18,
+        knee: 8,
+        ratio: 1 + (profile.ratio - 1) * amount,
+        attack: 0.014,
+        release: 0.16
+      });
+      const shaper = new WaveShaperNode(context, { curve: makeDriveCurve(profile.drive * amount), oversample: "2x" });
+      const output = context.createGain();
+      output.gain.value = 1;
+
+      source.connect(highpass).connect(lowShelf).connect(mid).connect(highShelf).connect(compressor).connect(shaper).connect(output).connect(context.destination);
+      source.start();
+      return context.startRendering();
+    }
+
+    function makeDriveCurve(amount) {
+      const samples = 2048;
+      const curve = new Float32Array(samples);
+      const drive = 1 + amount * 8;
+      for (let i = 0; i < samples; i += 1) {
+        const x = (i * 2) / samples - 1;
+        curve[i] = Math.tanh(x * drive) / Math.tanh(drive);
+      }
+      return curve;
+    }
+
+    function bufferToPlanar(buffer) {
+      return Array.from({ length: buffer.numberOfChannels }, (_, index) => new Float32Array(buffer.getChannelData(index)));
+    }
+
+    function planarToAudioBuffer(planar, sampleRate) {
+      const context = new OfflineAudioContext(planar.length, planar[0].length, sampleRate);
+      const buffer = context.createBuffer(planar.length, planar[0].length, sampleRate);
+      planar.forEach((channel, index) => buffer.copyToChannel(channel, index));
+      return buffer;
+    }
+
+    function applyGainAndLimiter(planar, sampleRate, targetLufs, safeLimiter) {
+      const before = analyzePlanar(planar, sampleRate);
+      const desiredGainDb = clamp(targetLufs - before.lufs, -14, 8);
+      const ceiling = safeLimiter ? dbToAmp(-1.0) : dbToAmp(-0.3);
+      const peak = Math.max(before.peak, 1e-9);
+      const maxGainDb = ampToDb(ceiling / peak);
+      const gainDb = Math.min(desiredGainDb, maxGainDb);
+      const gain = dbToAmp(gainDb);
+      forEachSample(planar, (value) => value * gain);
+      if (safeLimiter) softLimit(planar, ceiling);
+      return {
+        targetLufs,
+        desiredGainDb,
+        appliedGainDb: gainDb,
+        limited: gainDb < desiredGainDb - 0.05
+      };
+    }
+
+    function softLimit(planar, ceiling) {
+      const peak = getPeak(planar);
+      if (peak <= ceiling) return;
+      const drive = peak / ceiling;
+      forEachSample(planar, (value) => {
+        const limited = Math.tanh((value / ceiling) * drive) / Math.tanh(drive);
+        return clamp(limited * ceiling, -ceiling, ceiling);
+      });
+      const finalPeak = getPeak(planar);
+      if (finalPeak > ceiling) {
+        const trim = ceiling / finalPeak;
+        forEachSample(planar, (value) => value * trim);
+      }
+    }
+
+    function forEachSample(planar, mapper) {
+      for (const channel of planar) {
+        for (let i = 0; i < channel.length; i += 1) {
+          channel[i] = mapper(channel[i], i);
+        }
+      }
+    }
+
+    function analyzeBuffer(buffer) {
+      return analyzePlanar(bufferToPlanar(buffer), buffer.sampleRate);
+    }
+
+    function analyzePlanar(planar, sampleRate) {
+      const channelCount = planar.length;
+      const length = planar[0]?.length || 0;
+      let sumSquares = 0;
+      let peak = 0;
+      let clipped = 0;
+      for (const channel of planar) {
+        for (let i = 0; i < channel.length; i += 1) {
+          const value = channel[i];
+          const abs = Math.abs(value);
+          sumSquares += value * value;
+          if (abs > peak) peak = abs;
+          if (abs >= 0.98) clipped += 1;
+        }
+      }
+      const sampleTotal = Math.max(length * channelCount, 1);
+      const rms = Math.sqrt(sumSquares / sampleTotal);
+      const lufs = ampToDb(rms) - 0.691;
+      const crest = ampToDb(peak / Math.max(rms, 1e-9));
+      let width = 0;
+      if (channelCount >= 2) {
+        let midSq = 0;
+        let sideSq = 0;
+        const left = planar[0];
+        const right = planar[1];
+        for (let i = 0; i < length; i += 1) {
+          const mid = (left[i] + right[i]) * 0.5;
+          const side = (left[i] - right[i]) * 0.5;
+          midSq += mid * mid;
+          sideSq += side * side;
+        }
+        width = Math.sqrt(sideSq / Math.max(midSq, 1e-12));
+      }
+      return {
+        sampleRate,
+        channels: channelCount,
+        duration: length / sampleRate,
+        rms,
+        peak,
+        peakDb: ampToDb(peak),
+        lufs,
+        crest,
+        width,
+        clippingRatio: clipped / sampleTotal
+      };
+    }
+
+    function renderMetrics(analysis) {
+      els.metricLufs.textContent = Number.isFinite(analysis.lufs) ? analysis.lufs.toFixed(1) : "--";
+      els.metricPeak.textContent = Number.isFinite(analysis.peakDb) ? analysis.peakDb.toFixed(1) : "--";
+      els.metricCrest.textContent = Number.isFinite(analysis.crest) ? analysis.crest.toFixed(1) : "--";
+      els.metricWidth.textContent = Number.isFinite(analysis.width) ? analysis.width.toFixed(2) : "--";
+    }
+
+    function buildProcessingReport(before, after, profile, amount, gainInfo) {
+      const delta = after.lufs - before.lufs;
+      const lines = [
+        `처리 완료. 음량 변화 ${formatSigned(delta)} LUFS, peak ${after.peakDb.toFixed(1)} dBFS.`,
+        `적용량 ${(amount * 100).toFixed(0)}%, 목표 ${gainInfo.targetLufs.toFixed(1)} LUFS, gain ${formatSigned(gainInfo.appliedGainDb)} dB.`,
+        gainInfo.limited ? "헤드룸 보호 때문에 목표 gain 일부를 제한했습니다." : "헤드룸 안에서 목표 gain을 적용했습니다.",
+        after.clippingRatio > 0.0005 ? "주의: 출력에 높은 peak 구간이 있습니다." : "클리핑 위험 낮음. Lite safe limiter 경로를 통과했습니다."
+      ];
+      if (profile === profiles.voice_focus) lines.push("Voice Focus는 저역을 줄이고 명료도를 우선합니다.");
+      if (profile === profiles.bass_boost) lines.push("Bass Boost는 저역을 올리되 리미터로 headroom을 보호합니다.");
+      return lines;
+    }
+
+    function renderReport(lines) {
+      els.report.innerHTML = lines.map((line) => `<div class="report-item">${escapeHtml(line)}</div>`).join("");
+    }
+
+    function encodeWav(planar, sampleRate) {
+      const channels = planar.length;
+      const length = planar[0].length;
+      const bytesPerSample = 2;
+      const blockAlign = channels * bytesPerSample;
+      const buffer = new ArrayBuffer(44 + length * blockAlign);
+      const view = new DataView(buffer);
+      writeString(view, 0, "RIFF");
+      view.setUint32(4, 36 + length * blockAlign, true);
+      writeString(view, 8, "WAVE");
+      writeString(view, 12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, channels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, "data");
+      view.setUint32(40, length * blockAlign, true);
+      let offset = 44;
+      for (let i = 0; i < length; i += 1) {
+        for (let channel = 0; channel < channels; channel += 1) {
+          const sample = clamp(planar[channel][i], -1, 1);
+          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+          offset += 2;
+        }
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i += 1) view.setUint8(offset + i, string.charCodeAt(i));
+    }
+
+    function setProgress(percent, text) {
+      els.progressPercent.textContent = `${percent}%`;
+      els.barFill.style.width = `${percent}%`;
+      els.progressText.textContent = text;
+    }
+
+    function resetApp() {
+      sourceFile = null;
+      sourceBuffer = null;
+      sourceAnalysis = null;
+      if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+      sourceUrl = null;
+      revokeEnhanced();
+      els.fileInput.value = "";
+      els.fileTitle.innerHTML = "오디오 파일 선택<br>(Choose an audio file)";
+      els.originalPlayer.removeAttribute("src");
+      els.enhancedPlayer.removeAttribute("src");
+      els.originalTag.textContent = "No file";
+      els.enhancedTag.textContent = "Not processed";
+      els.processBtn.disabled = true;
+      els.downloadCard.classList.add("hidden");
+      els.progressWrap.classList.add("hidden");
+      ["metricLufs", "metricPeak", "metricCrest", "metricWidth"].forEach((key) => { els[key].textContent = "--"; });
+      els.report.innerHTML = "";
+    }
+
+    function revokeEnhanced() {
+      if (enhancedUrl) URL.revokeObjectURL(enhancedUrl);
+      enhancedUrl = null;
+      els.downloadCard.classList.add("hidden");
+    }
+
+    function getPeak(planar) {
+      let peak = 0;
+      for (const channel of planar) {
+        for (let i = 0; i < channel.length; i += 1) peak = Math.max(peak, Math.abs(channel[i]));
+      }
+      return peak;
+    }
+
+    function waitFrame() {
+      return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    }
+
+    function dbToAmp(db) {
+      return 10 ** (db / 20);
+    }
+
+    function ampToDb(value) {
+      return 20 * Math.log10(Math.max(value, 1e-9));
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function formatSigned(value) {
+      return `${value >= 0 ? "+" : ""}${value.toFixed(1)}`;
+    }
+
+    function formatDuration(seconds) {
+      const minutes = Math.floor(seconds / 60);
+      const rest = Math.round(seconds % 60).toString().padStart(2, "0");
+      return `${minutes}:${rest}`;
+    }
+
+    function formatChannels(buffer) {
+      return `${buffer.numberOfChannels}ch`;
+    }
+
+    function safeName(name) {
+      return (name || "audio").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    if ("serviceWorker" in navigator && location.protocol !== "file:") {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    }
+  </script>
+</body>
+</html>
