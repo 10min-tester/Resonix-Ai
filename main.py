@@ -2,6 +2,7 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import socket
@@ -13,6 +14,7 @@ import time
 import uuid
 import webbrowser
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote
 
@@ -21,8 +23,8 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 import uvicorn
-from scipy import signal
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from scipy import ndimage, signal
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +41,7 @@ OUTPUT_BIT_DEPTHS = {"16", "24"}
 FINAL_PCM_CEILING_DB = -0.3
 MANUAL_DSP_SAFE_CEILING_DB = -1.5
 STEM_FINAL_CEILING_DB = -1.2
+CODEC_SAFE_TRUE_PEAK_CEILING_DB = -1.4
 LOUDNESS_ABSOLUTE_GATE_LUFS = -70.0
 LOUDNESS_RELATIVE_GATE_OFFSET_LU = -10.0
 LOUDNESS_BLOCK_SECONDS = 0.400
@@ -53,7 +56,23 @@ STEM_RESIDUAL_MIN_SOURCE_RATIO = 0.003
 STEM_RESIDUAL_LOWCUT_HZ = 120.0
 QUALITY_GUARD_MAX_BLEND = 0.36
 QUALITY_GUARD_BASE_BLEND = 0.14
+QUALITY_GUARD_WARNING_BLEND = 0.15
+QUALITY_GUARD_SEVERE_BLEND = 0.35
+LOOKAHEAD_LIMITER_SECONDS = 0.004
+DYNAMIC_EQ_MAX_REDUCTION_DB = 1.45
+HARSHNESS_GUARD_MAX_REDUCTION_DB = 1.35
+MULTIBAND_TRANSIENT_MAX_BLEND = 0.14
+AI_AMOUNT_AUTO_MAX_BOOST = 0.14
+AI_AMOUNT_AUTO_MAX_CUT = 0.18
+DSP_BUDGET_LIMITS = {
+    "tone": 0.40,
+    "dynamics": 0.30,
+    "harmonics": 0.20,
+    "stereo": 0.15,
+    "stem": 0.35,
+}
 STEM_QUALITY_MODES = {"fast", "balanced", "precision"}
+ENABLE_PRECISION_STEMS = os.getenv("RESONIX_ENABLE_PRECISION_STEMS", "0") == "1"
 STEM_VOCAL_GAIN = 0.95
 STEM_INSTRUMENTAL_GAIN = 0.95
 STEM_REMIX_GAINS = {
@@ -69,6 +88,13 @@ STEM_GAIN_MATCH_MAX_BOOST_DB = {
     "drums": 1.4,
     "bass": 1.6,
     "other": 1.8,
+}
+STEM_ROLE_POLICY = {
+    "vocals": "clarity_bleed_safe",
+    "instrumental": "balanced_backing",
+    "drums": "transient_preserve",
+    "bass": "phase_locked_low_end",
+    "other": "ambience_preserve",
 }
 ENABLE_GTCRN_MODEL = os.getenv("RESONIX_ENABLE_GTCRN", "0") == "1"
 GTCRN_MAX_MODEL_SECONDS = 8.0
@@ -184,6 +210,138 @@ app.add_middleware(
 )
 
 
+class ProcessingCancelled(Exception):
+    pass
+
+
+class StemRiskFallback(Exception):
+    def __init__(self, target_mode: str, risk_map: dict[str, Any]):
+        super().__init__(f"Stem risk requested fallback to {target_mode}.")
+        self.target_mode = target_mode
+        self.risk_map = risk_map
+
+
+JOB_LOCK = threading.Lock()
+JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+JOBS: dict[str, dict[str, Any]] = {}
+
+
+def create_processing_job(kind: str) -> str:
+    job_id = str(uuid.uuid4())
+    now = time.time()
+    with JOB_LOCK:
+        JOBS[job_id] = {
+            "job_id": job_id,
+            "kind": kind,
+            "status": "queued",
+            "percent": 0,
+            "stage": "작업 대기 중 (Queued)",
+            "detail": "",
+            "result": None,
+            "error": None,
+            "cancel_requested": False,
+            "active_process_pid": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    return job_id
+
+
+def update_processing_job(job_id: str | None, **updates: Any) -> None:
+    if not job_id:
+        return
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def get_processing_job(job_id: str) -> dict[str, Any]:
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return dict(job)
+
+
+def is_cancel_requested(job_id: str | None) -> bool:
+    if not job_id:
+        return False
+    with JOB_LOCK:
+        return bool(JOBS.get(job_id, {}).get("cancel_requested"))
+
+
+def raise_if_cancelled(job_id: str | None) -> None:
+    if is_cancel_requested(job_id):
+        raise ProcessingCancelled("Processing was cancelled.")
+
+
+def sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): sanitize_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_json_value(item) for item in value]
+    if isinstance(value, np.generic):
+        return sanitize_json_value(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def is_local_client_host(host: str | None) -> bool:
+    if not host:
+        return False
+    host = host.split("%", 1)[0].strip().lower()
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+def allow_precision_for_client(host: str | None) -> bool:
+    return ENABLE_PRECISION_STEMS or is_local_client_host(host)
+
+
+def run_processing_job(job_id: str, worker, *args: Any, **kwargs: Any) -> None:
+    if is_cancel_requested(job_id):
+        update_processing_job(
+            job_id,
+            status="cancelled",
+            percent=0,
+            stage="처리 취소됨 (Cancelled)",
+            error="Processing was cancelled before it started.",
+        )
+        return
+    update_processing_job(job_id, status="running", percent=2, stage="작업 시작 (Starting)")
+    try:
+        result = sanitize_json_value(worker(*args, job_id=job_id, **kwargs))
+        update_processing_job(
+            job_id,
+            status="completed",
+            percent=100,
+            stage="처리 완료 (Processing complete)",
+            result=result,
+            active_process_pid=None,
+        )
+    except ProcessingCancelled:
+        update_processing_job(
+            job_id,
+            status="cancelled",
+            percent=0,
+            stage="처리 취소됨 (Cancelled)",
+            error="Processing was cancelled.",
+            active_process_pid=None,
+        )
+    except Exception as exc:
+        logger.exception("[JOB] Processing job failed: %s", job_id)
+        update_processing_job(
+            job_id,
+            status="failed",
+            stage="처리 실패 (Processing failed)",
+            error=str(exc),
+            active_process_pid=None,
+        )
+
+
 def get_resource_path(relative_path: str) -> str:
     base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
     return os.path.join(base_path, relative_path)
@@ -202,8 +360,17 @@ def validate_audio_file(filename: str) -> str:
 def save_upload(file: UploadFile, ext: str) -> str:
     task_id = str(uuid.uuid4())
     input_path = os.path.join(UPLOAD_DIR, f"{task_id}{ext}")
+    started_at = time.perf_counter()
     with open(input_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    size_mb = os.path.getsize(input_path) / (1024 * 1024)
+    logger.info(
+        "[UPLOAD] Saved %s as %s (%.1f MB) in %.1fs.",
+        file.filename,
+        os.path.basename(input_path),
+        size_mb,
+        time.perf_counter() - started_at,
+    )
     return input_path
 
 
@@ -468,6 +635,61 @@ def apply_low_bass_phase_guard(
     return mid_side_to_stereo(processed_mid, corrected_side), db(low_side_gain)
 
 
+def apply_multiband_stereo_guard(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if source_audio.ndim == 1 or processed_audio.ndim == 1:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "mono"}
+    if source_audio.shape[0] != 2 or processed_audio.shape[0] != 2 or sr <= 0:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "unsupported_channels"}
+
+    source_mid, source_side = stereo_to_mid_side(source_audio)
+    processed_mid, processed_side = stereo_to_mid_side(processed_audio)
+    corrected_side = processed_side.copy()
+    bands = [
+        ("low", 20.0, 160.0, 0.0, 1.15),
+        ("body", 160.0, 900.0, 0.72, 1.24),
+        ("presence", 900.0, 4200.0, 0.74, 1.30),
+        ("air", 4200.0, min(14000.0, sr * 0.45), 0.70, 1.35),
+    ]
+    changes: list[dict[str, Any]] = []
+
+    for name, low_hz, high_hz, min_ratio, max_ratio in bands:
+        if high_hz <= low_hz + 40.0:
+            continue
+        source_mid_band = bandpass_component(source_mid, sr, low_hz, high_hz)
+        source_side_band = bandpass_component(source_side, sr, low_hz, high_hz)
+        processed_mid_band = bandpass_component(processed_mid, sr, low_hz, high_hz)
+        processed_side_band = bandpass_component(processed_side, sr, low_hz, high_hz)
+
+        source_width = rms(source_side_band) / (rms(source_mid_band) + 1e-9)
+        processed_width = rms(processed_side_band) / (rms(processed_mid_band) + 1e-9)
+        if source_width <= 1e-5 or processed_width <= 1e-9:
+            continue
+
+        relative_width = processed_width / max(source_width, 1e-9)
+        target_relative = float(np.clip(relative_width, min_ratio, max_ratio))
+        if abs(target_relative - relative_width) < 0.03:
+            continue
+
+        gain = float(np.clip(target_relative / relative_width, 0.45, 1.35))
+        corrected_side += processed_side_band * (gain - 1.0)
+        changes.append({
+            "band": name,
+            "from": relative_width,
+            "to": target_relative,
+            "gain_db": db(gain),
+        })
+
+    if not changes:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "within_tolerance"}
+
+    guarded = mid_side_to_stereo(processed_mid, corrected_side)
+    return guarded.astype(np.float32), {"applied": True, "bands": changes[:4]}
+
+
 def resolve_output_bit_depth(bit_depth: str | None) -> str:
     value = str(bit_depth or "24").strip()
     return value if value in OUTPUT_BIT_DEPTHS else "24"
@@ -507,13 +729,40 @@ def apply_tpdf_dither(audio: np.ndarray, bit_depth: str | None) -> np.ndarray:
     return np.clip(dithered, -1.0, 1.0).astype(np.float32)
 
 
+def apply_noise_shaped_dither(audio: np.ndarray, bit_depth: str | None) -> tuple[np.ndarray, str]:
+    if resolve_output_bit_depth(bit_depth) != "16":
+        return audio.astype(np.float32), "none"
+
+    sanitized = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
+    lsb = 1.0 / 32768.0
+    tpdf = (np.random.random(sanitized.shape) - np.random.random(sanitized.shape)) * lsb
+    dithered = sanitized + tpdf
+    channels = as_channel_matrix(dithered)
+    shaped = np.empty_like(channels, dtype=np.float64)
+
+    # A gentle first-order error feedback pushes a little quantization noise upward
+    # without making the 16-bit output brittle or bright.
+    feedback = 0.62
+    for channel_index, channel in enumerate(channels):
+        error = 0.0
+        for sample_index, sample in enumerate(channel):
+            shaped_sample = sample + error * feedback
+            quantized = np.round(np.clip(shaped_sample, -1.0, 1.0) * 32767.0) / 32767.0
+            shaped[channel_index, sample_index] = quantized
+            error = shaped_sample - quantized
+
+    if audio.ndim == 1:
+        return np.clip(shaped[0], -1.0, 1.0).astype(np.float32), "first_order_error_feedback"
+    return np.clip(shaped, -1.0, 1.0).astype(np.float32), "first_order_error_feedback"
+
+
 def write_audio(path: str, audio: np.ndarray, sr: int, bit_depth: str | None = "24") -> None:
     audio, _ = apply_sample_peak_guard(audio)
     subtype = None
     if os.path.splitext(path)[1].lower() == ".wav":
         resolved_bit_depth = resolve_output_bit_depth(bit_depth)
         subtype = "PCM_16" if resolved_bit_depth == "16" else "PCM_24"
-        audio = apply_tpdf_dither(audio, resolved_bit_depth)
+        audio, _ = apply_noise_shaped_dither(audio, resolved_bit_depth)
     if audio.ndim == 1:
         sf.write(path, audio, sr, subtype=subtype)
         return
@@ -925,6 +1174,78 @@ def blend_target_profiles(targets: list[str]) -> dict[str, Any]:
     return blended
 
 
+def normalized_target_weights(targets: list[str]) -> dict[str, float]:
+    unique = targets or ["hifi_clean"]
+    weight = 1.0 / max(len(unique), 1)
+    return {target: weight for target in unique}
+
+
+def apply_total_dsp_budget(params: dict[str, Any], targets: list[str], amount: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    budgeted = dict(params)
+    amount = float(np.clip(amount, 0.0, 1.0))
+    target_weights = normalized_target_weights(targets)
+    raw_budget = {
+        "tone": max(
+            abs(float(budgeted.get("low_boost_db", 0.0))) / 6.0,
+            abs(float(budgeted.get("mid_cut_db", 0.0))) / 6.0,
+            abs(float(budgeted.get("high_boost_db", 0.0))) / 6.0,
+        ) * amount,
+        "dynamics": max(0.0, (float(budgeted.get("compress_ratio", 1.0)) - 1.0) / 3.0) * amount,
+        "harmonics": max(float(budgeted.get("exciter_amount", 0.0)), float(budgeted.get("saturation_amount", 0.0))) * amount,
+        "stereo": min(0.15, 0.04 * max(len(targets) - 1, 0)) * amount,
+        "stem": min(0.35, STEM_INTENSITY_CAP * amount),
+    }
+    reductions: dict[str, float] = {}
+    for key, limit in DSP_BUDGET_LIMITS.items():
+        used = raw_budget.get(key, 0.0)
+        reductions[key] = 1.0 if used <= limit or used <= 1e-9 else float(limit / used)
+
+    tone_scale = reductions["tone"]
+    harmonic_scale = min(reductions["harmonics"], 1.0)
+    dynamic_scale = reductions["dynamics"]
+    budgeted["low_boost_db"] = float(budgeted.get("low_boost_db", 0.0)) * tone_scale
+    budgeted["mid_cut_db"] = float(budgeted.get("mid_cut_db", 0.0)) * tone_scale
+    budgeted["high_boost_db"] = float(budgeted.get("high_boost_db", 0.0)) * tone_scale
+    budgeted["compress_ratio"] = 1.0 + (float(budgeted.get("compress_ratio", 1.0)) - 1.0) * dynamic_scale
+    budgeted["exciter_amount"] = float(budgeted.get("exciter_amount", 0.0)) * harmonic_scale
+    budgeted["saturation_amount"] = float(budgeted.get("saturation_amount", 0.0)) * harmonic_scale
+    return clamp_dsp_params(budgeted), {
+        "enabled": True,
+        "target_weights": target_weights,
+        "raw_budget": raw_budget,
+        "limits": DSP_BUDGET_LIMITS,
+        "reductions": reductions,
+    }
+
+
+def attenuate_harmonics_for_source_risk(params: dict[str, Any], analysis: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    guarded = dict(params)
+    risk = 0.0
+    reasons: list[str] = []
+    if float(analysis.get("noise_floor_db", -90.0)) > -48.0:
+        risk += 0.25
+        reasons.append("noise_floor")
+    if float(analysis.get("spectral_flatness", 0.0)) > 0.08:
+        risk += 0.18
+        reasons.append("lossy_or_noisy_texture")
+    if float(analysis.get("true_peak_db", -180.0)) > -2.0:
+        risk += 0.20
+        reasons.append("limited_headroom")
+    if float(analysis.get("high_energy", 0.0)) > 0.36:
+        risk += 0.12
+        reasons.append("bright_source")
+
+    factor = float(np.clip(1.0 - risk, 0.45, 1.0))
+    guarded["exciter_amount"] = float(guarded.get("exciter_amount", 0.0)) * factor
+    guarded["saturation_amount"] = float(guarded.get("saturation_amount", 0.0)) * factor
+    return clamp_dsp_params(guarded), {
+        "enabled": True,
+        "risk": float(np.clip(risk, 0.0, 1.0)),
+        "factor": factor,
+        "reasons": reasons,
+    }
+
+
 def scale_dsp_params_for_ai_amount(
     params: dict[str, Any],
     analysis: dict[str, Any],
@@ -945,6 +1266,119 @@ def scale_dsp_params_for_ai_amount(
     return clamp_dsp_params(scaled)
 
 
+def adaptive_ai_amount(
+    analysis: dict[str, Any],
+    targets: list[str],
+    requested_amount: float,
+) -> tuple[float, dict[str, Any]]:
+    requested = float(np.clip(requested_amount, 0.0, 1.0))
+    if requested <= 0.02:
+        return requested, {
+            "enabled": True,
+            "requested": requested,
+            "effective": requested,
+            "adjustment": 0.0,
+            "source_condition": "bypass",
+            "reasons": ["AI amount is near zero; auto adjustment was bypassed."],
+        }
+
+    flags = set(analysis.get("quality_flags", []))
+    reasons: list[str] = []
+    adjustment = 0.0
+    risk = 0.0
+    enhancement_need = 0.0
+
+    if "high_noise_floor" in flags:
+        adjustment += 0.07
+        enhancement_need += 0.20
+        reasons.append("High noise floor needs slightly stronger restoration.")
+    if "dull_high_end" in flags:
+        adjustment += 0.06
+        enhancement_need += 0.16
+        reasons.append("Dull high end needs more tone recovery.")
+    if "very_low_loudness" in flags:
+        adjustment += 0.04
+        enhancement_need += 0.10
+        reasons.append("Very low loudness benefits from firmer processing.")
+    if "low_sample_rate" in flags:
+        adjustment += 0.03
+        enhancement_need += 0.10
+        reasons.append("Low sample-rate material needs conservative recovery help.")
+
+    if "clipping_detected" in flags or "hot_loudness" in flags:
+        adjustment -= 0.07
+        risk += 0.18
+        reasons.append("Hot or clipped source needs less aggressive processing.")
+
+    separation = float(analysis.get("band_separation_score", 50.0))
+    if separation >= 72.0:
+        adjustment -= 0.05
+        reasons.append("Source already has good band separation.")
+    elif separation < 45.0:
+        adjustment += 0.04
+        enhancement_need += 0.12
+        reasons.append("Low band separation needs more corrective shaping.")
+
+    crest = float(analysis.get("crest_db", 12.0))
+    if 8.0 <= crest <= 17.0 and not flags:
+        adjustment -= 0.05
+        reasons.append("Source dynamics are already balanced.")
+    elif crest > 20.0:
+        adjustment += 0.03
+        enhancement_need += 0.08
+        reasons.append("Wide dynamics can use slightly more leveling.")
+    elif crest < 7.0:
+        adjustment -= 0.05
+        risk += 0.12
+        reasons.append("Flat dynamics need protection from over-processing.")
+
+    if int(analysis.get("channels", 1)) >= 2:
+        phase = float(analysis.get("phase_correlation", 1.0))
+        width = float(analysis.get("stereo_width", 0.0))
+        if phase < 0.18:
+            adjustment -= 0.08
+            risk += 0.20
+            reasons.append("Phase-sensitive stereo image needs lighter processing.")
+        if width > 1.15:
+            adjustment -= 0.04
+            risk += 0.10
+            reasons.append("Wide stereo image needs staging preservation.")
+
+    target_set = set(targets)
+    if "restore" in target_set:
+        adjustment -= 0.04
+    if "loud_modern" in target_set:
+        adjustment += 0.03
+    if "bass_boost" in target_set and float(analysis.get("low_energy", 0.0)) > 0.44:
+        adjustment -= 0.04
+        risk += 0.10
+        reasons.append("Bass-heavy source limits additional low-end processing.")
+
+    adjustment = float(np.clip(adjustment, -AI_AMOUNT_AUTO_MAX_CUT, AI_AMOUNT_AUTO_MAX_BOOST))
+    effective = float(np.clip(requested + adjustment, 0.0, 1.0))
+    if requested <= 0.20:
+        effective = min(effective, requested + 0.05)
+
+    condition = "balanced"
+    if risk >= 0.28:
+        condition = "fragile"
+    elif enhancement_need >= 0.30:
+        condition = "needs_recovery"
+    elif adjustment < -0.04:
+        condition = "already_polished"
+
+    return effective, {
+        "enabled": True,
+        "requested": requested,
+        "effective": effective,
+        "adjustment": effective - requested,
+        "source_condition": condition,
+        "risk_score": float(np.clip(risk, 0.0, 1.0)),
+        "enhancement_need": float(np.clip(enhancement_need, 0.0, 1.0)),
+        "reasons": reasons[:4] or ["Source is balanced; AI amount stayed close to the requested value."],
+    }
+
+
 def recommend_processing(
     analysis: dict[str, Any],
     target: str = "hifi_clean",
@@ -954,7 +1388,8 @@ def recommend_processing(
     targets = parse_processing_targets(target)
     target = targets[0]
     has_bass_boost = "bass_boost" in targets
-    ai_amount = 0.6 if user_intensity is None else float(np.clip(user_intensity, 0.0, 1.0))
+    requested_ai_amount = 0.6 if user_intensity is None else float(np.clip(user_intensity, 0.0, 1.0))
+    ai_amount = requested_ai_amount
     intensity = 0.45
     reasons: list[str] = []
     params: dict[str, Any] = blend_target_profiles(targets)
@@ -1079,8 +1514,19 @@ def recommend_processing(
         confidence -= 0.12
         reasons.append("Short files provide less reliable analysis.")
 
+    ai_amount, adaptive_info = adaptive_ai_amount(analysis, targets, requested_ai_amount)
+    if abs(adaptive_info["adjustment"]) >= 0.015:
+        direction = "reduced" if adaptive_info["adjustment"] < 0 else "increased"
+        reasons.append(f"Adaptive AI amount {direction} processing strength based on source quality.")
+
     intensity = float(np.clip(intensity * ai_amount, 0.0, 1.0))
     params = scale_dsp_params_for_ai_amount(clamp_dsp_params(params), analysis, ai_amount)
+    params, dsp_budget = apply_total_dsp_budget(params, targets, ai_amount)
+    params, harmonic_guard = attenuate_harmonics_for_source_risk(params, analysis)
+    if any(float(value) < 0.999 for value in dsp_budget.get("reductions", {}).values()):
+        reasons.append("Total DSP budget limited combined target processing to prevent over-processing.")
+    if harmonic_guard.get("factor", 1.0) < 0.98:
+        reasons.append("Reduced exciter/saturation because the source has noise, harshness, or limited headroom risk.")
     model_denoise = (
         ENABLE_GTCRN_MODEL
         and
@@ -1098,7 +1544,11 @@ def recommend_processing(
         "targets": targets,
         "mode": mode,
         "intensity": float(np.clip(intensity, 0.0, 1.0)),
+        "requested_ai_amount": requested_ai_amount,
         "ai_amount": ai_amount,
+        "adaptive_ai": adaptive_info,
+        "dsp_budget": dsp_budget,
+        "harmonic_safety": harmonic_guard,
         "dsp_params": params,
         "stereo_safe": stereo_safe,
         "output_sr": output_sr,
@@ -1228,6 +1678,327 @@ def apply_band_balance_guard(source_audio: np.ndarray, processed_audio: np.ndarr
     return guarded.astype(np.float32), float(applied_db)
 
 
+def stft_band_ratio(magnitude: np.ndarray, freqs: np.ndarray, start_hz: float, end_hz: float) -> np.ndarray:
+    if magnitude.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    mask = (freqs >= start_hz) & (freqs < end_hz)
+    if not np.any(mask):
+        return np.zeros(magnitude.shape[1], dtype=np.float64)
+    band = np.mean(np.square(magnitude[mask, :]), axis=0)
+    total = np.mean(np.square(magnitude), axis=0) + 1e-12
+    return band / total
+
+
+def smooth_frame_gain(frame_gain: np.ndarray, sr: int, hop_length: int) -> np.ndarray:
+    if frame_gain.size <= 2:
+        return frame_gain.astype(np.float64)
+    attack_coeff = float(np.exp(-hop_length / max(sr * 0.012, 1.0)))
+    release_coeff = float(np.exp(-hop_length / max(sr * 0.110, 1.0)))
+    smoothed = np.empty_like(frame_gain, dtype=np.float64)
+    current = 1.0
+    for index, target in enumerate(frame_gain):
+        coeff = attack_coeff if target < current else release_coeff
+        current = float(target + (current - target) * coeff)
+        smoothed[index] = current
+    return smoothed
+
+
+def apply_dynamic_masking_eq_channel(
+    source_channel: np.ndarray,
+    processed_channel: np.ndarray,
+    sr: int,
+    target: str,
+) -> tuple[np.ndarray, float]:
+    if sr <= 0 or len(processed_channel) < 2048:
+        return processed_channel.astype(np.float32), 0.0
+
+    sample_count = min(len(source_channel), len(processed_channel))
+    source_channel = source_channel[:sample_count].astype(np.float32)
+    processed_channel = processed_channel[:sample_count].astype(np.float32)
+    n_fft = min(4096, max(1024, int(2 ** np.floor(np.log2(max(sample_count, 1024))))))
+    hop_length = max(512, n_fft // 4)
+
+    source_stft = librosa.stft(source_channel, n_fft=n_fft, hop_length=hop_length)
+    processed_stft = librosa.stft(processed_channel, n_fft=n_fft, hop_length=hop_length)
+    if processed_stft.size == 0:
+        return processed_channel.astype(np.float32), 0.0
+
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    source_mag = np.abs(source_stft)
+    processed_mag = np.abs(processed_stft)
+    gain = np.ones_like(processed_mag, dtype=np.float64)
+
+    low_excess = stft_band_ratio(processed_mag, freqs, 45.0, 220.0) - stft_band_ratio(source_mag, freqs, 45.0, 220.0)
+    low_mid_excess = stft_band_ratio(processed_mag, freqs, 220.0, 650.0) - stft_band_ratio(source_mag, freqs, 220.0, 650.0)
+    harsh_excess = stft_band_ratio(processed_mag, freqs, 2600.0, 7200.0) - stft_band_ratio(source_mag, freqs, 2600.0, 7200.0)
+
+    reductions: list[float] = []
+    band_rules = [
+        (45.0, 240.0, low_excess, 0.050, DYNAMIC_EQ_MAX_REDUCTION_DB * (0.75 if target == "bass_boost" else 1.0)),
+        (220.0, 760.0, low_mid_excess, 0.045, 1.10),
+        (2600.0, 7800.0, harsh_excess, 0.040, 0.75 if target == "hifi_bright" else DYNAMIC_EQ_MAX_REDUCTION_DB),
+    ]
+
+    for low_hz, high_hz, excess, threshold, max_reduction_db in band_rules:
+        if excess.size == 0:
+            continue
+        reduction_db = np.clip((excess - threshold) * 16.0, 0.0, max_reduction_db)
+        if float(np.max(reduction_db)) <= 0.01:
+            continue
+        frame_gain = smooth_frame_gain(10 ** (-reduction_db / 20.0), sr, hop_length)
+        band_mask = np.clip(
+            smoothstep_weight(freqs, low_hz * 0.82, low_hz) * (1.0 - smoothstep_weight(freqs, high_hz, high_hz * 1.22)),
+            0.0,
+            1.0,
+        )
+        gain *= 1.0 - band_mask[:, np.newaxis] * (1.0 - frame_gain[np.newaxis, :])
+        reductions.append(float(np.max(reduction_db)))
+
+    if not reductions:
+        return processed_channel.astype(np.float32), 0.0
+
+    phase = np.exp(1j * np.angle(processed_stft))
+    restored = librosa.istft(np.abs(processed_stft) * gain * phase, hop_length=hop_length, length=sample_count)
+    return restored.astype(np.float32), max(reductions)
+
+
+def apply_dynamic_masking_eq(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+    target: str,
+) -> tuple[np.ndarray, float]:
+    if sr <= 0:
+        return processed_audio.astype(np.float32), 0.0
+    processed_channels = as_channel_matrix(processed_audio)
+    source_channels = fit_audio_length(as_fixed_channel_matrix(source_audio, processed_channels.shape[0]), processed_channels.shape[-1])
+    guarded_channels: list[np.ndarray] = []
+    max_reduction = 0.0
+    for index in range(processed_channels.shape[0]):
+        guarded, reduction_db = apply_dynamic_masking_eq_channel(
+            source_channels[index],
+            processed_channels[index],
+            sr,
+            target,
+        )
+        guarded_channels.append(guarded)
+        max_reduction = max(max_reduction, reduction_db)
+    return stack_channels(guarded_channels, processed_audio.ndim == 1), max_reduction
+
+
+def apply_mix_harshness_guard(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+    target: str,
+) -> tuple[np.ndarray, float]:
+    if sr <= 0:
+        return processed_audio.astype(np.float32), 0.0
+    source_channels = as_channel_matrix(source_audio)
+    processed_channels = as_channel_matrix(processed_audio)
+    channel_count = min(source_channels.shape[0], processed_channels.shape[0])
+    sample_count = min(source_channels.shape[-1], processed_channels.shape[-1])
+    if channel_count <= 0 or sample_count < 32:
+        return processed_audio.astype(np.float32), 0.0
+
+    guarded = processed_channels.copy()
+    max_reduction_db = 0.0
+    allowed_multiplier = 1.55 if target == "hifi_bright" else 1.28
+    floor_ratio = 0.075 if target == "hifi_bright" else 0.055
+
+    for index in range(channel_count):
+        src = source_channels[index, :sample_count]
+        proc = processed_channels[index, :sample_count]
+        harsh_band = bandpass_component(proc, sr, 3600.0, min(9200.0, sr * 0.45))
+        source_harsh = bandpass_component(src, sr, 3600.0, min(9200.0, sr * 0.45))
+        proc_ratio = rms(harsh_band) / (rms(proc) + 1e-9)
+        source_ratio = rms(source_harsh) / (rms(src) + 1e-9)
+        allowed_ratio = max(source_ratio * allowed_multiplier, floor_ratio)
+        if proc_ratio <= allowed_ratio or proc_ratio <= 1e-9:
+            continue
+        reduction = float(np.clip(allowed_ratio / proc_ratio, 10 ** (-HARSHNESS_GUARD_MAX_REDUCTION_DB / 20.0), 1.0))
+        guarded[index, :sample_count] = guarded[index, :sample_count] - harsh_band * (1.0 - reduction)
+        max_reduction_db = min(max_reduction_db, db(reduction))
+
+    if processed_audio.ndim == 1:
+        return guarded[0].astype(np.float32), max_reduction_db
+    return guarded.astype(np.float32), max_reduction_db
+
+
+def apply_click_repair(audio: np.ndarray, sr: int) -> tuple[np.ndarray, dict[str, Any]]:
+    channels = as_channel_matrix(audio)
+    if sr <= 0 or channels.size == 0 or channels.shape[-1] < 128:
+        return audio.astype(np.float32), {"applied": False, "clicks": 0}
+
+    repaired = channels.copy()
+    total_clicks = 0
+    max_clicks = max(24, int(channels.shape[-1] * channels.shape[0] * 0.0009))
+
+    for index, channel in enumerate(channels):
+        median = signal.medfilt(channel, kernel_size=5)
+        residual = channel - median
+        abs_residual = np.abs(residual)
+        noise_ref = float(np.median(abs_residual)) + 1e-9
+        threshold = max(noise_ref * 12.0, 0.055)
+        candidates = np.where(abs_residual > threshold)[0]
+        if candidates.size == 0:
+            continue
+
+        local_diff = np.abs(np.diff(channel, prepend=channel[0]))
+        transient_ref = float(np.percentile(local_diff, 95)) + 1e-9
+        selected: list[int] = []
+        last = -8
+        for sample_index in candidates:
+            if sample_index <= 1 or sample_index >= len(channel) - 2:
+                continue
+            if sample_index - last <= 2:
+                continue
+            if local_diff[sample_index] < transient_ref * 1.15:
+                continue
+            selected.append(int(sample_index))
+            last = int(sample_index)
+            if total_clicks + len(selected) >= max_clicks:
+                break
+
+        for sample_index in selected:
+            repaired[index, sample_index] = float((channel[sample_index - 1] + channel[sample_index + 1]) * 0.5)
+        total_clicks += len(selected)
+
+    if total_clicks <= 0:
+        return audio.astype(np.float32), {"applied": False, "clicks": 0}
+
+    return stack_channels([repaired[index] for index in range(repaired.shape[0])], audio.ndim == 1), {
+        "applied": True,
+        "clicks": int(total_clicks),
+    }
+
+
+def apply_multiband_ms_delta_clamp(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if source_audio.ndim == 1 or processed_audio.ndim == 1 or sr <= 0:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "mono"}
+    if source_audio.shape[0] != 2 or processed_audio.shape[0] != 2:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "unsupported_channels"}
+
+    source_ref = fit_audio_length(as_fixed_channel_matrix(source_audio, 2), as_channel_matrix(processed_audio).shape[-1])
+    processed_ref = fit_audio_length(as_fixed_channel_matrix(processed_audio, 2), source_ref.shape[-1])
+    source_mid, source_side = stereo_to_mid_side(source_ref)
+    processed_mid, processed_side = stereo_to_mid_side(processed_ref)
+    corrected_side = processed_side.copy()
+    changes: list[dict[str, Any]] = []
+    band_rules = [
+        ("sub", 20.0, 90.0, 0.00, 1.00),
+        ("bass", 90.0, 180.0, 0.00, 1.08),
+        ("low_mid", 180.0, 600.0, 0.72, 1.20),
+        ("mid", 600.0, 3500.0, 0.80, 1.18),
+        ("presence", 3500.0, 9000.0, 0.70, 1.12),
+        ("air", 9000.0, min(16000.0, sr * 0.45), 0.72, 1.32),
+    ]
+
+    for name, low_hz, high_hz, min_ratio, max_ratio in band_rules:
+        if high_hz <= low_hz + 30.0:
+            continue
+        source_mid_band = bandpass_component(source_mid, sr, low_hz, high_hz)
+        source_side_band = bandpass_component(source_side, sr, low_hz, high_hz)
+        processed_mid_band = bandpass_component(processed_mid, sr, low_hz, high_hz)
+        processed_side_band = bandpass_component(processed_side, sr, low_hz, high_hz)
+        source_width = rms(source_side_band) / (rms(source_mid_band) + 1e-9)
+        processed_width = rms(processed_side_band) / (rms(processed_mid_band) + 1e-9)
+        if processed_width <= 1e-9:
+            continue
+        relative_width = processed_width / max(source_width, 1e-6)
+        if name in {"sub", "bass"} and processed_width > source_width:
+            target_relative = min(relative_width, max_ratio)
+        else:
+            target_relative = float(np.clip(relative_width, min_ratio, max_ratio))
+        if abs(target_relative - relative_width) < 0.025:
+            continue
+        gain = float(np.clip(target_relative / relative_width, 0.35, 1.25))
+        corrected_side += processed_side_band * (gain - 1.0)
+        changes.append({"band": name, "gain_db": db(gain), "from": relative_width, "to": target_relative})
+
+    guarded = mid_side_to_stereo(processed_mid, corrected_side)
+    phase_before = analyze_stereo_image(source_ref, sr).get("phase_correlation", 1.0)
+    phase_after = analyze_stereo_image(guarded, sr).get("phase_correlation", 1.0)
+    if phase_after < phase_before - 0.28 or phase_after < -0.08:
+        mid, side = stereo_to_mid_side(guarded)
+        side *= 0.88
+        guarded = mid_side_to_stereo(mid, side)
+        changes.append({"band": "phase", "gain_db": db(0.88), "from": phase_after, "to": phase_before})
+
+    if not changes:
+        return processed_audio.astype(np.float32), {"applied": False, "reason": "within_tolerance"}
+    return guarded.astype(np.float32), {"applied": True, "changes": changes[:6]}
+
+
+def compensate_channel_tilt(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if source_audio.ndim == 1 or processed_audio.ndim == 1 or source_audio.shape[0] != 2 or processed_audio.shape[0] != 2:
+        return processed_audio.astype(np.float32), {"applied": False}
+    source_ref = fit_audio_length(as_fixed_channel_matrix(source_audio, 2), as_channel_matrix(processed_audio).shape[-1])
+    processed_ref = fit_audio_length(as_fixed_channel_matrix(processed_audio, 2), source_ref.shape[-1])
+
+    def band_lr_delta(matrix: np.ndarray, low_hz: float, high_hz: float) -> float:
+        left = bandpass_component(matrix[0], sr, low_hz, high_hz)
+        right = bandpass_component(matrix[1], sr, low_hz, high_hz)
+        return db((rms(left) + 1e-9) / (rms(right) + 1e-9))
+
+    source_presence = band_lr_delta(source_ref, 3000.0, min(5200.0, sr * 0.45))
+    processed_presence = band_lr_delta(processed_ref, 3000.0, min(5200.0, sr * 0.45))
+    drift_db = processed_presence - source_presence
+    if abs(drift_db) < 0.45:
+        return processed_audio.astype(np.float32), {"applied": False, "presence_drift_db": drift_db}
+
+    correction_db = float(np.clip(-drift_db * 0.45, -1.0, 1.0))
+    corrected = processed_ref.copy()
+    if correction_db > 0:
+        corrected[0] *= 10 ** (correction_db / 40.0)
+        corrected[1] *= 10 ** (-correction_db / 40.0)
+    else:
+        corrected[0] *= 10 ** (correction_db / 40.0)
+        corrected[1] *= 10 ** (-correction_db / 40.0)
+    return corrected.astype(np.float32), {"applied": True, "presence_drift_db": drift_db, "correction_db": correction_db}
+
+
+def apply_delta_based_guard(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+    amount: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    source_channels = as_channel_matrix(source_audio)
+    processed_channels = as_channel_matrix(processed_audio)
+    target_channels = processed_channels.shape[0]
+    target_len = processed_channels.shape[-1]
+    source_ref = fit_audio_length(as_fixed_channel_matrix(source_audio, target_channels), target_len)
+    amount = float(np.clip(amount, 0.0, 1.0))
+    raw_delta = processed_channels - source_ref
+    delta_peak = float(np.max(np.abs(raw_delta))) if raw_delta.size else 0.0
+    source_peak = float(np.max(np.abs(source_ref))) if source_ref.size else 0.0
+    max_delta_peak = max(source_peak * 0.65, 0.05)
+    delta_scale = 1.0 if delta_peak <= max_delta_peak or delta_peak <= 1e-9 else max_delta_peak / delta_peak
+    guarded = source_ref + raw_delta * amount * delta_scale
+    if target_channels == 2:
+        guarded, ms_info = apply_multiband_ms_delta_clamp(source_ref, guarded, sr)
+        guarded, tilt_info = compensate_channel_tilt(source_ref, guarded, sr)
+    else:
+        ms_info = {"applied": False}
+        tilt_info = {"applied": False}
+    return stack_channels([as_channel_matrix(guarded)[index] for index in range(target_channels)], processed_audio.ndim == 1), {
+        "applied": True,
+        "amount": amount,
+        "delta_scale": float(delta_scale),
+        "ms_delta_clamp": ms_info,
+        "channel_tilt": tilt_info,
+    }
+
+
 def crest_factor_db(audio: np.ndarray) -> float:
     channels = as_channel_matrix(audio)
     if channels.size == 0:
@@ -1289,6 +2060,55 @@ def apply_transient_preservation(
     if processed_audio.ndim == 1:
         return restored[0].astype(np.float32), crest_loss_db
     return restored.astype(np.float32), crest_loss_db
+
+
+def apply_multiband_transient_preservation(
+    source_audio: np.ndarray,
+    processed_audio: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, float]:
+    if sr <= 0:
+        return processed_audio.astype(np.float32), 0.0
+
+    source_channels = as_channel_matrix(source_audio)
+    processed_channels = as_channel_matrix(processed_audio)
+    channel_count = min(source_channels.shape[0], processed_channels.shape[0])
+    sample_count = min(source_channels.shape[-1], processed_channels.shape[-1])
+    if channel_count <= 0 or sample_count < 64:
+        return processed_audio.astype(np.float32), 0.0
+
+    restored = processed_channels.copy()
+    max_crest_loss = 0.0
+    band_rules = [
+        (45.0, 180.0, 0.075),
+        (180.0, 1300.0, 0.115),
+        (1300.0, 6200.0, 0.085),
+    ]
+
+    for index in range(channel_count):
+        source = source_channels[index, :sample_count]
+        processed = processed_channels[index, :sample_count]
+        for low_hz, high_hz, max_blend in band_rules:
+            upper = min(high_hz, sr * 0.45)
+            if upper <= low_hz + 30.0:
+                continue
+            source_band = bandpass_component(source, sr, low_hz, upper)
+            processed_band = bandpass_component(processed, sr, low_hz, upper)
+            crest_loss = crest_factor_db(source_band) - crest_factor_db(processed_band)
+            if crest_loss <= 1.0:
+                continue
+            mask = transient_mask(source_band, sr)
+            if mask.size == 0 or float(np.max(mask)) <= 0.02:
+                continue
+            blend = float(np.clip((crest_loss - 0.8) / 12.0, 0.0, min(max_blend, MULTIBAND_TRANSIENT_MAX_BLEND)))
+            if blend <= 0.001:
+                continue
+            restored[index, :sample_count] += (source_band - processed_band) * mask * blend
+            max_crest_loss = max(max_crest_loss, crest_loss)
+
+    if processed_audio.ndim == 1:
+        return restored[0].astype(np.float32), max_crest_loss
+    return restored.astype(np.float32), max_crest_loss
 
 
 def apply_soft_compression(audio: np.ndarray, sr: int, ratio: float) -> np.ndarray:
@@ -1679,14 +2499,30 @@ def apply_soft_limiter(audio: np.ndarray, ceiling_db: float, sr: int) -> np.ndar
         return audio.astype(np.float32)
 
     desired_gain = np.minimum(1.0, ceiling / (linked_peak + 1e-12))
-    release_seconds = 0.08
+    lookahead_samples = max(1, int(round(sr * LOOKAHEAD_LIMITER_SECONDS))) if sr > 0 else 1
+    filter_size = max(3, lookahead_samples * 2 + 1)
+    if filter_size % 2 == 0:
+        filter_size += 1
+    try:
+        desired_gain = ndimage.minimum_filter1d(
+            desired_gain,
+            size=filter_size,
+            mode="nearest",
+            origin=-lookahead_samples,
+        )
+    except Exception:
+        logger.debug("[LIMITER] Lookahead gain prefilter fallback used.", exc_info=True)
+
+    attack_seconds = 0.0015
+    release_seconds = 0.090
+    attack_coeff = float(np.exp(-1.0 / max(sr * attack_seconds, 1.0)))
     release_coeff = float(np.exp(-1.0 / max(sr * release_seconds, 1.0)))
     gain = np.empty_like(desired_gain)
     current_gain = 1.0
 
     for index, target_gain in enumerate(desired_gain):
         if target_gain < current_gain:
-            current_gain = float(target_gain)
+            current_gain = float(target_gain + (current_gain - target_gain) * attack_coeff)
         else:
             current_gain = float(target_gain + (current_gain - target_gain) * release_coeff)
         gain[index] = current_gain
@@ -1759,6 +2595,10 @@ def finalize_output_safety(
 ) -> tuple[np.ndarray, list[str]]:
     finalized = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     steps: list[str] = []
+    requested_ceiling_db = float(ceiling_db)
+    ceiling_db = min(requested_ceiling_db, CODEC_SAFE_TRUE_PEAK_CEILING_DB)
+    if ceiling_db < requested_ceiling_db - 0.01:
+        steps.append(f"codec_safe_true_peak_ceiling_{ceiling_db:.1f}dbtp")
     ceiling = 10 ** (ceiling_db / 20.0)
     allowed_clipping_ratio = 0.0 if strict else 0.0005
     iteration_count = 4 if strict else 2
@@ -1913,6 +2753,11 @@ def process_audio_chain(
             steps.append(f"low_bass_phase_guard_{low_bass_side_gain_db:+.1f}db")
         else:
             steps.append("low_bass_phase_checked")
+        processed_audio, stereo_guard_info = apply_multiband_stereo_guard(audio, processed_audio, sr)
+        if stereo_guard_info.get("applied"):
+            steps.append("multiband_stereo_guard_" + "_".join(item["band"] for item in stereo_guard_info.get("bands", [])))
+        else:
+            steps.append("multiband_stereo_guard_checked")
 
     processed_audio, band_guard_db = apply_band_balance_guard(audio, processed_audio, sr)
     if band_guard_db >= 0.05:
@@ -1920,16 +2765,75 @@ def process_audio_chain(
     else:
         steps.append("source_band_balance_checked")
 
+    target_name = str(recommendation.get("target", "hifi_clean"))
+    processed_audio, dynamic_eq_db = apply_dynamic_masking_eq(audio, processed_audio, sr, target_name)
+    if dynamic_eq_db >= 0.05:
+        steps.append(f"dynamic_masking_eq_{dynamic_eq_db:.1f}db")
+    else:
+        steps.append("dynamic_masking_eq_checked")
+
+    processed_audio, harshness_reduction_db = apply_mix_harshness_guard(audio, processed_audio, sr, target_name)
+    if harshness_reduction_db < -0.05:
+        steps.append(f"harshness_guard_{harshness_reduction_db:+.1f}db")
+    else:
+        steps.append("harshness_guard_checked")
+
+    processed_audio, click_repair_info = apply_click_repair(processed_audio, sr)
+    if click_repair_info.get("applied"):
+        steps.append(f"micro_click_repair_{int(click_repair_info.get('clicks', 0))}")
+    else:
+        steps.append("micro_click_repair_checked")
+
     processed_audio, transient_loss_db = apply_transient_preservation(audio, processed_audio, sr)
     if transient_loss_db > 1.2:
         steps.append(f"transient_preservation_{transient_loss_db:.1f}db")
     else:
         steps.append("transient_preservation_checked")
 
+    processed_audio, multiband_transient_loss_db = apply_multiband_transient_preservation(audio, processed_audio, sr)
+    if multiband_transient_loss_db > 1.0:
+        steps.append(f"multiband_transient_preservation_{multiband_transient_loss_db:.1f}db")
+    else:
+        steps.append("multiband_transient_checked")
+
+    delta_amount = float(np.clip(recommendation.get("ai_amount", intensity), 0.0, 1.0))
+    processed_audio, delta_guard = apply_delta_based_guard(audio, processed_audio, sr, delta_amount)
+    steps.append(f"delta_based_dsp_amount_{delta_guard.get('amount', delta_amount):.2f}_scale_{delta_guard.get('delta_scale', 1.0):.2f}")
+    if (delta_guard.get("ms_delta_clamp") or {}).get("applied"):
+        steps.append("multiband_ms_delta_clamp")
+    if (delta_guard.get("channel_tilt") or {}).get("applied"):
+        steps.append(f"channel_tilt_compensated_{float((delta_guard.get('channel_tilt') or {}).get('correction_db', 0.0)):+.1f}db")
+
+    inter_peak = float(np.max(np.abs(as_channel_matrix(processed_audio)))) if processed_audio.size else 0.0
+    inter_limit = 10 ** (-1.0 / 20.0)
+    if inter_peak > inter_limit:
+        inter_gain = inter_limit / max(inter_peak, 1e-9)
+        processed_audio = (processed_audio * inter_gain).astype(np.float32)
+        steps.append(f"inter_module_peak_watch_{db(inter_gain):+.1f}db")
+    else:
+        steps.append("inter_module_peak_watch_checked")
+
     output_sr = int(recommendation.get("output_sr", sr))
     if output_sr != sr:
         processed_audio = resample_audio(processed_audio, sr, output_sr)
         steps.append(f"high_quality_resample_{sr}_to_{output_sr}")
+
+    if strict_safety:
+        predicted_true_peak_db = db(estimate_true_peak(processed_audio, oversample_factor=4))
+        if predicted_true_peak_db > CODEC_SAFE_TRUE_PEAK_CEILING_DB:
+            trim_db = CODEC_SAFE_TRUE_PEAK_CEILING_DB - predicted_true_peak_db
+            if trim_db < -5.0:
+                reduction = 10 ** ((trim_db + 5.0) / 20.0)
+                source_ref = prepare_stem_for_mix(audio, sr, output_sr, as_channel_matrix(processed_audio).shape[0], as_channel_matrix(processed_audio).shape[-1])
+                processed_ref = as_channel_matrix(processed_audio)
+                processed_audio = stack_channels(
+                    [source_ref[index] * 0.35 + processed_ref[index] * 0.65 * reduction for index in range(processed_ref.shape[0])],
+                    processed_audio.ndim == 1,
+                )
+                steps.append("manual_dsp_amount_auto_reduced_gt_5db_limiter_risk")
+            else:
+                processed_audio = processed_audio * (10 ** (trim_db / 20.0))
+            steps.append(f"manual_predicted_true_peak_trim_{trim_db:+.1f}db")
 
     if params["normalize"]:
         processed_audio, gain_db, gain_limited = apply_loudness_normalize(
@@ -1982,6 +2886,135 @@ def process_audio_chain(
     return processed_audio.astype(np.float32), output_sr, steps
 
 
+def quality_check_item(
+    check_id: str,
+    label: str,
+    value: float,
+    status: str,
+    detail: str,
+    unit: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "label": label,
+        "value": value,
+        "unit": unit,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def build_quality_validation(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    recommendation: dict[str, Any],
+    steps: list[str],
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    volume_mode = recommendation.get("volume_mode")
+    target_lufs = float(recommendation.get("dsp_params", {}).get("target_lufs", -16.0))
+    ceiling_db = float(recommendation.get("dsp_params", {}).get("limiter_ceiling_db", -1.5))
+    target = str(recommendation.get("target", ""))
+
+    loudness_delta = float(after.get("lufs", 0.0)) - float(before.get("lufs", 0.0))
+    if volume_mode == "match_source":
+        loudness_abs = abs(loudness_delta)
+        loudness_status = "pass" if loudness_abs <= 1.25 else "review" if loudness_abs <= 2.25 else "fail"
+        loudness_detail = f"source match delta {loudness_delta:+.1f} LU"
+        loudness_value = loudness_delta
+    else:
+        target_delta = float(after.get("lufs", 0.0)) - target_lufs
+        loudness_status = "pass" if abs(target_delta) <= 1.5 else "review" if abs(target_delta) <= 2.8 else "fail"
+        loudness_detail = f"target delta {target_delta:+.1f} LU"
+        loudness_value = target_delta
+    checks.append(quality_check_item("loudness", "Loudness match", loudness_value, loudness_status, loudness_detail, "LU"))
+
+    true_peak_db = float(after.get("true_peak_db", -180.0))
+    peak_status = "pass" if true_peak_db <= ceiling_db + 0.05 else "review" if true_peak_db <= ceiling_db + 0.20 else "fail"
+    checks.append(quality_check_item("true_peak", "True peak headroom", true_peak_db, peak_status, f"ceiling {ceiling_db:.1f} dBTP", "dBTP"))
+
+    clipping_ratio = float(after.get("clipping_ratio", 0.0))
+    clipping_status = "pass" if clipping_ratio <= 0.0005 else "review" if clipping_ratio <= 0.0015 else "fail"
+    checks.append(quality_check_item("clipping", "Clipping risk", clipping_ratio, clipping_status, f"ratio {clipping_ratio:.5f}"))
+
+    width_delta = float(after.get("stereo_width", 0.0)) - float(before.get("stereo_width", 0.0))
+    phase_delta = float(after.get("phase_correlation", 0.0)) - float(before.get("phase_correlation", 0.0))
+    if int(after.get("channels", 1)) < 2:
+        stereo_status = "pass"
+    else:
+        width_abs = abs(width_delta)
+        phase_abs = abs(phase_delta)
+        stereo_status = "pass" if width_abs <= 0.18 and phase_abs <= 0.22 else "review" if width_abs <= 0.30 and phase_abs <= 0.35 else "fail"
+    checks.append(quality_check_item("stereo", "Stereo image", width_delta, stereo_status, f"width {width_delta:+.2f}, phase {phase_delta:+.2f}"))
+
+    separation_delta = float(after.get("band_separation_score", 0.0)) - float(before.get("band_separation_score", 0.0))
+    separation_status = "pass" if separation_delta >= -6.0 else "review" if separation_delta >= -12.0 else "fail"
+    checks.append(quality_check_item("separation", "Band separation", separation_delta, separation_status, f"score delta {separation_delta:+.1f}", "pt"))
+
+    crest_loss = float(before.get("crest_db", 0.0)) - float(after.get("crest_db", 0.0))
+    crest_limit = 6.0 if "loud_modern" in target else 4.5
+    crest_status = "pass" if crest_loss <= crest_limit else "review" if crest_loss <= crest_limit + 2.0 else "fail"
+    checks.append(quality_check_item("transients", "Transient retention", -crest_loss, crest_status, f"crest loss {crest_loss:.1f} dB", "dB"))
+
+    high_delta = float(after.get("high_energy", 0.0)) - float(before.get("high_energy", 0.0))
+    flatness_delta = float(after.get("spectral_flatness", 0.0)) - float(before.get("spectral_flatness", 0.0))
+    harshness_status = "pass"
+    if high_delta > 0.22 and flatness_delta > 0.035 and "hifi_bright" not in target:
+        harshness_status = "fail"
+    elif high_delta > 0.16 and flatness_delta > 0.025:
+        harshness_status = "review"
+    checks.append(quality_check_item("harshness", "Harshness control", high_delta, harshness_status, f"high {high_delta:+.2f}, flatness {flatness_delta:+.3f}"))
+
+    excessive_loudness_gain = max(0.0, loudness_delta - (1.0 if volume_mode == "match_source" else 3.0))
+    stem_artifact_penalty = 0.0
+    stem_report = recommendation.get("stem_separation") or {}
+    if stem_report.get("enabled"):
+        stem_artifact_penalty = float(((stem_report.get("stem_risk_map") or {}).get("average", 0.0))) * 12.0
+    status_weights = {
+        "loudness": 0.12,
+        "true_peak": 0.19,
+        "clipping": 0.16,
+        "stereo": 0.16,
+        "separation": 0.13,
+        "transients": 0.13,
+        "harshness": 0.11,
+    }
+    status_score = {"pass": 1.0, "review": 0.55, "fail": 0.0}
+    weighted_score = 0.0
+    for item in checks:
+        weighted_score += status_weights.get(item["id"], 0.10) * status_score.get(item["status"], 0.0)
+    penalties = (
+        excessive_loudness_gain * 4.5
+        + max(0.0, abs(phase_delta) - 0.18) * 18.0
+        + max(0.0, crest_loss - crest_limit) * 2.0
+        + max(0.0, high_delta - 0.14) * 22.0
+        + stem_artifact_penalty
+    )
+    bonuses = (
+        max(0.0, separation_delta) * 0.18
+        + (4.0 if true_peak_db <= CODEC_SAFE_TRUE_PEAK_CEILING_DB + 0.05 else 0.0)
+        + (3.0 if abs(width_delta) <= 0.12 and abs(phase_delta) <= 0.16 else 0.0)
+    )
+    score = float(np.clip(weighted_score * 100.0 + bonuses - penalties, 0.0, 100.0))
+    fail_count = sum(1 for item in checks if item["status"] == "fail")
+    review_count = sum(1 for item in checks if item["status"] == "review")
+    overall = "pass" if fail_count == 0 and review_count <= 1 else "review" if fail_count == 0 else "fail"
+
+    return {
+        "enabled": True,
+        "overall": overall,
+        "score": score,
+        "checks": checks,
+        "risk": {
+            "excessive_loudness_gain": excessive_loudness_gain,
+            "stem_artifact_penalty": stem_artifact_penalty,
+            "penalties": penalties,
+            "bonuses": bonuses,
+        },
+        "protected_by_quality_guard": any(step.startswith("post_quality_guard") for step in steps),
+    }
+
+
 def build_comparison_report(
     before: dict[str, Any],
     after: dict[str, Any],
@@ -2001,6 +3034,7 @@ def build_comparison_report(
         np.clip(100.0 - (stereo_delta * 120.0 + phase_delta * 80.0), 0.0, 100.0)
     )
     separation_delta = after.get("band_separation_score", 0.0) - before.get("band_separation_score", 0.0)
+    quality_validation = build_quality_validation(before, after, recommendation, steps)
 
     return {
         "before": before,
@@ -2022,7 +3056,10 @@ def build_comparison_report(
         "recommendation": recommendation,
         "applied_steps": steps,
         "warnings": after.get("quality_flags", []),
+        "quality_validation": quality_validation,
         "quality_summary": {
+            "validation_overall": quality_validation["overall"],
+            "validation_score": quality_validation["score"],
             "volume_matched": volume_matched,
             "loudness_meter": "bs1770_style_k_weighted_gated",
             "loudness_delta_db": loudness_delta,
@@ -2102,6 +3139,18 @@ def apply_post_quality_guard(
 ) -> tuple[np.ndarray, list[str], dict[str, Any], dict[str, Any]]:
     after = analyze_array(processed_audio, output_sr, {"channels": before.get("channels", 1)})
     drift_flags = evaluate_quality_drift(before, after, recommendation)
+    if int(before.get("channels", 1)) >= 2 and output_sr > 0:
+        target_channels = as_channel_matrix(processed_audio).shape[0]
+        target_len = as_channel_matrix(processed_audio).shape[-1]
+        source_ref_for_drift = prepare_stem_for_mix(source_audio, source_sr, output_sr, target_channels, target_len)
+        processed_ref_for_drift = fit_audio_length(as_fixed_channel_matrix(processed_audio, target_channels), target_len)
+        if target_channels == 2:
+            src_mid, src_side = stereo_to_mid_side(source_ref_for_drift)
+            proc_mid, proc_side = stereo_to_mid_side(processed_ref_for_drift)
+            src_low_ratio = rms(lowpass_component(src_side, output_sr, 140.0)) / (rms(lowpass_component(src_mid, output_sr, 140.0)) + 1e-9)
+            proc_low_ratio = rms(lowpass_component(proc_side, output_sr, 140.0)) / (rms(lowpass_component(proc_mid, output_sr, 140.0)) + 1e-9)
+            if proc_low_ratio > max(src_low_ratio * 1.35, src_low_ratio + 0.08):
+                drift_flags.append("low_bass_side_growth")
     if not drift_flags:
         return processed_audio.astype(np.float32), ["post_quality_guard_checked"], after, {
             "applied": False,
@@ -2113,7 +3162,9 @@ def apply_post_quality_guard(
     target_len = as_channel_matrix(processed_audio).shape[-1]
     processed_ref = fit_audio_length(as_fixed_channel_matrix(processed_audio, target_channels), target_len)
     source_ref = prepare_stem_for_mix(source_audio, source_sr, output_sr, target_channels, target_len)
-    blend = float(np.clip(QUALITY_GUARD_BASE_BLEND + 0.055 * len(drift_flags), 0.0, QUALITY_GUARD_MAX_BLEND))
+    severe_flags = {"headroom_risk", "phase_correlation_loss", "transient_flattening", "high_band_harshness"}
+    severity = "severe" if any(flag in severe_flags for flag in drift_flags) or len(drift_flags) >= 3 else "warning"
+    blend = QUALITY_GUARD_SEVERE_BLEND if severity == "severe" else QUALITY_GUARD_WARNING_BLEND
     guarded = processed_ref * (1.0 - blend) + source_ref * blend
 
     ceiling_db = float(recommendation.get("dsp_params", {}).get("limiter_ceiling_db", -1.5))
@@ -2145,6 +3196,7 @@ def apply_post_quality_guard(
     return guarded.astype(np.float32), steps, guarded_after, {
         "applied": True,
         "flags": drift_flags,
+        "severity": severity,
         "blend": blend,
         "loudness_match_gain_db": match_gain_db,
         "gain_limited": match_limited,
@@ -2157,18 +3209,128 @@ def analyze_audio_file(path: str) -> tuple[np.ndarray, int, dict[str, Any]]:
     return audio, sr, analyze_array(audio, sr, source_info)
 
 
+def extract_preview_segment(audio: np.ndarray, sr: int, seconds: float = 20.0) -> np.ndarray:
+    channels = as_channel_matrix(audio)
+    if sr <= 0 or channels.size == 0:
+        return audio.astype(np.float32)
+    segment_len = max(1, int(round(sr * seconds)))
+    total_len = channels.shape[-1]
+    if total_len <= segment_len:
+        return audio.astype(np.float32)
+
+    frame_len = max(512, int(round(sr * 0.35)))
+    hop = max(256, frame_len // 2)
+    mono = np.mean(channels, axis=0)
+    energies: list[float] = []
+    starts: list[int] = []
+    for start in range(0, max(total_len - frame_len, 1), hop):
+        frame = mono[start:start + frame_len]
+        energies.append(float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0.0)
+        starts.append(start)
+    if not energies:
+        center = total_len // 2
+    else:
+        threshold = float(np.percentile(energies, 65))
+        active_starts = [start for start, energy in zip(starts, energies) if energy >= threshold]
+        center = active_starts[len(active_starts) // 2] if active_starts else total_len // 2
+    start = int(np.clip(center - segment_len // 2, 0, total_len - segment_len))
+    segment = channels[:, start:start + segment_len]
+    if audio.ndim == 1:
+        return segment[0].astype(np.float32)
+    return segment.astype(np.float32)
+
+
+def process_preset_previews(
+    input_path: str,
+    original_filename: str,
+    targets: list[str] | None = None,
+    intensity: float | None = None,
+    use_denoise: bool = True,
+    volume_mode: str = "match_source",
+    output_sample_rate: str | None = "auto",
+    output_bit_depth: str | None = "24",
+) -> dict[str, Any]:
+    audio, sr, source_info = load_audio(input_path)
+    preview_audio = extract_preview_segment(audio, sr)
+    before = analyze_array(preview_audio, sr, source_info)
+    preview_targets = targets or ["hifi_clean", "warm_analog", "bass_boost"]
+    results: list[dict[str, Any]] = []
+    task_id = str(uuid.uuid4())
+    bit_depth = resolve_output_bit_depth(output_bit_depth)
+
+    for target in preview_targets[:5]:
+        resolved_target = parse_processing_targets(target)[0]
+        recommendation = prepare_recommendation_for_request(
+            before,
+            sr,
+            resolved_target,
+            intensity,
+            use_denoise,
+            volume_mode,
+            None,
+        )
+        recommendation["output_sr"] = resolve_output_sample_rate(
+            output_sample_rate,
+            sr,
+            int(recommendation.get("output_sr", sr)),
+        )
+        recommendation["output_bit_depth"] = bit_depth
+        processed, output_sr, steps = process_audio_chain(preview_audio, sr, recommendation)
+        processed, quality_guard_steps, after, quality_guard = apply_post_quality_guard(
+            processed,
+            preview_audio,
+            sr,
+            output_sr,
+            before,
+            recommendation,
+        )
+        steps.extend(quality_guard_steps)
+        report = build_comparison_report(before, after, recommendation, steps)
+        report["quality_guard"] = quality_guard
+        output_filename = f"{task_id}_preview_{resolved_target}.wav"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        write_audio(output_path, processed, output_sr, bit_depth=bit_depth)
+        download_name = f"preview_{resolved_target}_{safe_download_stem(original_filename)}.wav"
+        results.append(
+            {
+                "target": resolved_target,
+                "download_url": build_download_url(output_filename, download_name),
+                "filename": download_name,
+                "validation_score": report.get("quality_validation", {}).get("score"),
+                "validation_overall": report.get("quality_validation", {}).get("overall"),
+                "validation_risk": report.get("quality_validation", {}).get("risk", {}),
+                "lufs": after.get("lufs"),
+                "true_peak_db": after.get("true_peak_db"),
+                "report": report,
+            }
+        )
+
+    best = max(results, key=lambda item: float(item.get("validation_score") or 0.0), default=None)
+    return {
+        "source_filename": original_filename,
+        "duration": float(as_channel_matrix(preview_audio).shape[-1] / max(sr, 1)),
+        "targets": preview_targets[:5],
+        "recommended_target": best.get("target") if best else None,
+        "items": results,
+    }
+
+
 def resolve_stem_separation_mode(value: str | None) -> str:
     mode = (value or "off").strip().lower()
     return mode if mode in {"off", "2stem", "4stem"} else "off"
 
 
-def resolve_stem_quality_mode(value: str | None) -> str:
+def resolve_stem_quality_mode(value: str | None, allow_precision: bool = False) -> str:
     mode = (value or "balanced").strip().lower()
-    return mode if mode in STEM_QUALITY_MODES else "balanced"
+    if mode not in STEM_QUALITY_MODES:
+        return "balanced"
+    if mode == "precision" and not (ENABLE_PRECISION_STEMS or allow_precision):
+        return "balanced"
+    return mode
 
 
-def demucs_quality_args(stem_quality: str) -> list[str]:
-    quality = resolve_stem_quality_mode(stem_quality)
+def demucs_quality_args(stem_quality: str, allow_precision: bool = False) -> list[str]:
+    quality = resolve_stem_quality_mode(stem_quality, allow_precision=allow_precision)
     if quality == "fast":
         return ["--overlap", "0.10"]
     if quality == "precision":
@@ -2176,9 +3338,15 @@ def demucs_quality_args(stem_quality: str) -> list[str]:
     return ["--overlap", "0.25"]
 
 
-def resolve_demucs_command(input_path: str, output_dir: str, stem_mode: str, stem_quality: str = "balanced") -> list[str]:
+def resolve_demucs_command(
+    input_path: str,
+    output_dir: str,
+    stem_mode: str,
+    stem_quality: str = "balanced",
+    allow_precision: bool = False,
+) -> list[str]:
     demucs_args = ["--two-stems=vocals"] if stem_mode == "2stem" else []
-    quality_args = demucs_quality_args(stem_quality)
+    quality_args = demucs_quality_args(stem_quality, allow_precision=allow_precision)
     runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demucs_runner.py")
     if os.path.exists(runner_path) and not getattr(sys, "frozen", False) and importlib.util.find_spec("demucs"):
         return [
@@ -2220,10 +3388,22 @@ def find_demucs_stem(output_dir: str, filename: str) -> str:
     return matches[0]
 
 
-def run_demucs_stems(input_path: str, stem_mode: str, stem_quality: str = "balanced") -> tuple[dict[str, str], str]:
+def run_demucs_stems(
+    input_path: str,
+    stem_mode: str,
+    stem_quality: str = "balanced",
+    job_id: str | None = None,
+    allow_precision: bool = False,
+) -> tuple[dict[str, str], str]:
     started_at = time.perf_counter()
     work_dir = tempfile.mkdtemp(prefix="demucs_", dir=UPLOAD_DIR)
-    command = resolve_demucs_command(input_path, work_dir, stem_mode, stem_quality)
+    command = resolve_demucs_command(
+        input_path,
+        work_dir,
+        stem_mode,
+        stem_quality,
+        allow_precision=allow_precision,
+    )
     env = os.environ.copy()
     try:
         import static_ffmpeg
@@ -2237,22 +3417,55 @@ def run_demucs_stems(input_path: str, stem_mode: str, stem_quality: str = "balan
         logger.warning("[STEM] static-ffmpeg path setup failed; falling back to system PATH.", exc_info=True)
 
     logger.info("[STEM] Running Demucs %s/%s separation: %s", stem_mode, stem_quality, " ".join(command[:6]))
+    update_processing_job(
+        job_id,
+        percent=18,
+        stage=f"Demucs {stem_mode}/{stem_quality} 분리 중 (Separating stems)",
+        detail="곡 길이와 stem 품질에 따라 몇 분 걸릴 수 있습니다.",
+    )
 
+    process: subprocess.Popen[str] | None = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=60 * 20,
             env=env,
         )
+        update_processing_job(job_id, active_process_pid=process.pid)
+        deadline = time.monotonic() + 60 * 20
+        while True:
+            raise_if_cancelled(job_id)
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() > deadline:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise HTTPException(status_code=500, detail="Demucs stem separation timed out.")
+        returncode = process.returncode
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=500, detail="Demucs stem separation timed out.") from exc
+    except ProcessingCancelled:
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        logger.info("[STEM] Demucs cancelled for job %s.", job_id)
+        raise
+    finally:
+        update_processing_job(job_id, active_process_pid=None)
 
-    if completed.returncode != 0:
-        demucs_output = "\n".join(part for part in (completed.stderr, completed.stdout) if part)
-        logger.error("[STEM] Demucs failed (%s): %s", completed.returncode, demucs_output[-4000:])
+    if returncode != 0:
+        demucs_output = "\n".join(part for part in (stderr, stdout) if part)
+        logger.error("[STEM] Demucs failed (%s): %s", returncode, demucs_output[-4000:])
         raise HTTPException(status_code=500, detail="Demucs stem separation failed.")
 
     logger.info("[STEM] Demucs %s/%s separation completed in %.1fs.", stem_mode, stem_quality, time.perf_counter() - started_at)
@@ -2361,19 +3574,127 @@ def remix_processed_stem_map(
     return stack_channels([mixed[index] for index in range(target_channels)], target_channels == 1)
 
 
-def shape_stem_residual(residual: np.ndarray, sr: int) -> np.ndarray:
+def optimize_stem_remix_against_source(
+    processed_stems: dict[str, tuple[np.ndarray, int]],
+    source_audio: np.ndarray,
+    source_sr: int,
+    output_sr: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    source_channels = as_channel_matrix(source_audio)
+    target_channels = int(source_channels.shape[0])
+    target_len = int(round(source_channels.shape[-1] * (output_sr / max(source_sr, 1))))
+    target_len = max(target_len, 1)
+    source_ref = prepare_stem_for_mix(source_audio, source_sr, output_sr, target_channels, target_len)
+    names = list(processed_stems.keys())
+    if not names:
+        return remix_processed_stem_map(processed_stems, source_audio, source_sr, output_sr), {
+            "applied": False,
+            "reason": "no_stems",
+        }
+
+    aligned_stems = [
+        prepare_stem_for_mix(stem_audio, stem_sr, output_sr, target_channels, target_len)
+        for stem_audio, stem_sr in processed_stems.values()
+    ]
+    sample_count = target_len
+    stride = max(1, sample_count // 24000)
+    basis = [stem[:, ::stride].reshape(-1) for stem in aligned_stems]
+    target = source_ref[:, ::stride].reshape(-1)
+    if target.size < len(names) * 8 or rms(target) <= 1e-9:
+        mixed = sum(
+            aligned_stems[index] * float(STEM_REMIX_GAINS.get(names[index], 0.95))
+            for index in range(len(names))
+        )
+        return stack_channels([mixed[index] for index in range(target_channels)], target_channels == 1), {
+            "applied": False,
+            "reason": "insufficient_reference",
+        }
+
+    matrix = np.stack(basis, axis=1).astype(np.float64)
+    try:
+        solved, *_ = np.linalg.lstsq(matrix, target.astype(np.float64), rcond=None)
+    except np.linalg.LinAlgError:
+        solved = np.array([STEM_REMIX_GAINS.get(name, 0.95) for name in names], dtype=np.float64)
+
+    gains: dict[str, float] = {}
+    mixed = np.zeros((target_channels, target_len), dtype=np.float32)
+    gain_limits_db = {
+        "vocals": 0.75,
+        "instrumental": 0.75,
+        "drums": 1.2,
+        "bass": 1.0,
+        "other": 0.75,
+    }
+    for index, name in enumerate(names):
+        default_gain = float(STEM_REMIX_GAINS.get(name, 0.95))
+        limit_db = float(gain_limits_db.get(name, 0.75))
+        low_bound = default_gain * (10 ** (-limit_db / 20.0))
+        high_bound = default_gain * (10 ** (limit_db / 20.0))
+        gain = float(np.clip(solved[index], low_bound, high_bound))
+        gains[name] = gain
+        mixed += aligned_stems[index] * gain
+
+    base_error = rms(
+        sum(
+            aligned_stems[index] * float(STEM_REMIX_GAINS.get(names[index], 0.95))
+            for index in range(len(names))
+        )
+        - source_ref
+    )
+    optimized_error = rms(mixed - source_ref)
+    source_stereo = analyze_stereo_image(source_ref, output_sr)
+    mixed_stereo = analyze_stereo_image(mixed, output_sr)
+    metric_drift = {
+        "lufs": estimate_integrated_loudness(mixed, output_sr) - estimate_integrated_loudness(source_ref, output_sr),
+        "crest_db": crest_factor_db(mixed) - crest_factor_db(source_ref),
+        "phase_correlation": mixed_stereo.get("phase_correlation", 0.0) - source_stereo.get("phase_correlation", 0.0),
+        "stereo_width": mixed_stereo.get("stereo_width", 0.0) - source_stereo.get("stereo_width", 0.0),
+        "mid_lufs": mixed_stereo.get("mid_lufs", -180.0) - source_stereo.get("mid_lufs", -180.0),
+        "side_lufs": mixed_stereo.get("side_lufs", -180.0) - source_stereo.get("side_lufs", -180.0),
+    }
+    return stack_channels([mixed[index] for index in range(target_channels)], target_channels == 1), {
+        "applied": True,
+        "gains": gains,
+        "gain_limits_db": gain_limits_db,
+        "metric_drift": metric_drift,
+        "error_reduction": 0.0 if base_error <= 1e-9 else float(np.clip((base_error - optimized_error) / base_error, -1.0, 1.0)),
+    }
+
+
+def shape_stem_residual(residual: np.ndarray, sr: int, source_ref: np.ndarray | None = None) -> np.ndarray:
     matrix = as_channel_matrix(residual).astype(np.float32)
     if matrix.size == 0 or sr <= 0:
         return matrix.astype(np.float32)
 
     if matrix.shape[0] == 2:
         mid, side = stereo_to_mid_side(matrix)
-        shaped_mid = apply_soft_highpass(mid, sr, STEM_RESIDUAL_LOWCUT_HZ * 1.45) * 0.45
-        shaped_side = apply_soft_highpass(side, sr, STEM_RESIDUAL_LOWCUT_HZ) * 0.90
+        low_mid = lowpass_component(mid, sr, 140.0) * 0.035
+        body_mid = bandpass_component(mid, sr, 180.0, min(1100.0, sr * 0.45)) * 0.20
+        presence_mid = bandpass_component(mid, sr, 1100.0, min(6200.0, sr * 0.45)) * 0.38
+        air_mid = apply_soft_highpass(mid, sr, 6200.0) * 0.28
+
+        low_side = lowpass_component(side, sr, 150.0) * 0.025
+        body_side = bandpass_component(side, sr, 180.0, min(900.0, sr * 0.45)) * 0.38
+        image_side = bandpass_component(side, sr, 900.0, min(7800.0, sr * 0.45)) * 0.86
+        air_side = apply_soft_highpass(side, sr, 7800.0) * 0.88
+
+        shaped_mid = low_mid + body_mid + presence_mid + air_mid
+        shaped_side = low_side + body_side + image_side + air_side
+        if source_ref is not None and source_ref.ndim == 2 and source_ref.shape[0] == 2:
+            source_mid, source_side = stereo_to_mid_side(source_ref)
+            source_width = rms(source_side) / (rms(source_mid) + 1e-9)
+            residual_width = rms(shaped_side) / (rms(shaped_mid) + 1e-9)
+            if residual_width > source_width * 1.45 and residual_width > 1e-9:
+                shaped_side *= float(np.clip((source_width * 1.45) / residual_width, 0.45, 1.0))
         return mid_side_to_stereo(shaped_mid, shaped_side).astype(np.float32)
 
     shaped_channels = [
-        apply_soft_highpass(channel, sr, STEM_RESIDUAL_LOWCUT_HZ) * 0.55
+        (
+            lowpass_component(channel, sr, 150.0) * 0.16
+            + bandpass_component(channel, sr, 180.0, min(1200.0, sr * 0.45)) * 0.30
+            + bandpass_component(channel, sr, 1200.0, min(6800.0, sr * 0.45)) * 0.42
+            + apply_soft_highpass(channel, sr, 6800.0) * 0.25
+        )
         for channel in matrix
     ]
     return np.stack(shaped_channels, axis=0).astype(np.float32)
@@ -2386,6 +3707,7 @@ def apply_stem_residual_preservation(
     source_audio: np.ndarray,
     source_sr: int,
     output_sr: int,
+    stem_risk_map: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     source_channels = as_channel_matrix(source_audio)
     target_channels = int(source_channels.shape[0])
@@ -2408,7 +3730,7 @@ def apply_stem_residual_preservation(
             "source_ratio": 0.0 if source_rms <= 1e-9 else residual_rms / source_rms,
         }
 
-    shaped_residual = shape_stem_residual(residual, output_sr)
+    shaped_residual = shape_stem_residual(residual, output_sr, source_ref)
     shaped_rms = rms(shaped_residual)
     if shaped_rms <= 1e-9:
         return mixed_audio.astype(np.float32), {
@@ -2417,8 +3739,11 @@ def apply_stem_residual_preservation(
             "source_ratio": residual_rms / source_rms,
         }
 
-    max_gain = (source_rms * STEM_RESIDUAL_MAX_SOURCE_RATIO) / shaped_rms
-    blend_gain = float(np.clip(min(STEM_RESIDUAL_BLEND, max_gain), 0.0, STEM_RESIDUAL_BLEND))
+    average_risk = float((stem_risk_map or {}).get("average", 0.35))
+    quality_factor = float(np.clip(1.0 - average_risk, 0.12, 0.95))
+    target_blend = float(np.clip(0.03 + quality_factor * 0.22, 0.03, 0.25))
+    max_gain = (source_rms * max(STEM_RESIDUAL_MAX_SOURCE_RATIO, target_blend * 0.5)) / shaped_rms
+    blend_gain = float(min(target_blend, max_gain, 0.25))
     if blend_gain <= 1e-6:
         return mixed_audio.astype(np.float32), {
             "applied": False,
@@ -2435,6 +3760,8 @@ def apply_stem_residual_preservation(
         "blend_gain_db": db(blend_gain),
         "source_ratio": residual_rms / source_rms,
         "shaped_source_ratio": (shaped_rms * blend_gain) / source_rms,
+        "quality_factor": quality_factor,
+        "target_blend": target_blend,
         "low_bass_side_gain_db": low_bass_side_gain_db,
     }
 
@@ -2503,6 +3830,114 @@ def prepare_recommendation_for_request(
     return recommendation
 
 
+def estimate_stem_artifact_risk(stem_before: dict[str, Any], stem_name: str) -> tuple[float, list[str]]:
+    risk = 0.0
+    reasons: list[str] = []
+    flatness = float(stem_before.get("spectral_flatness", 0.0))
+    noise_floor = float(stem_before.get("noise_floor_db", -90.0))
+    crest = float(stem_before.get("crest_db", 12.0))
+    phase = float(stem_before.get("phase_correlation", 1.0))
+    width = float(stem_before.get("stereo_width", 0.0))
+
+    if flatness > 0.12:
+        risk += 0.24
+        reasons.append("high spectral flatness")
+    elif flatness > 0.08:
+        risk += 0.12
+        reasons.append("moderate spectral flatness")
+
+    if noise_floor > -42.0:
+        risk += 0.22
+        reasons.append("high stem noise floor")
+    elif noise_floor > -50.0:
+        risk += 0.10
+        reasons.append("moderate stem noise floor")
+
+    if crest < 6.0:
+        risk += 0.12
+        reasons.append("flat stem dynamics")
+    if stem_name in {"vocals", "other"} and width > 1.25:
+        risk += 0.12
+        reasons.append("wide diffuse stem image")
+    if int(stem_before.get("channels", 1)) >= 2 and phase < 0.05:
+        risk += 0.18
+        reasons.append("phase-sensitive stem")
+
+    if stem_name == "vocals" and float(stem_before.get("high_energy", 0.0)) > 0.42:
+        risk += 0.10
+        reasons.append("vocal stem has strong high-band bleed")
+
+    return float(np.clip(risk, 0.0, 1.0)), reasons
+
+
+def build_stem_risk_entry(stem_before: dict[str, Any], stem_name: str) -> dict[str, Any]:
+    artifact, reasons = estimate_stem_artifact_risk(stem_before, stem_name)
+    flatness = float(stem_before.get("spectral_flatness", 0.0))
+    noise_floor = float(stem_before.get("noise_floor_db", -90.0))
+    crest = float(stem_before.get("crest_db", 12.0))
+    phase = float(stem_before.get("phase_correlation", 1.0))
+    width = float(stem_before.get("stereo_width", 0.0))
+    bleed = float(np.clip((flatness - 0.055) * 2.5 + max(0.0, noise_floor + 54.0) / 34.0, 0.0, 1.0))
+    transient_smear = float(np.clip((8.5 - crest) / 8.5, 0.0, 1.0))
+    phase_instability = float(np.clip((0.22 - phase) / 0.52 + max(0.0, width - 1.25) * 0.18, 0.0, 1.0))
+    residual_mismatch = float(np.clip(abs(float(stem_before.get("band_separation_score", 50.0)) - 58.0) / 70.0, 0.0, 1.0))
+    score = float(np.clip(
+        artifact * 0.34
+        + bleed * 0.22
+        + transient_smear * 0.16
+        + phase_instability * 0.18
+        + residual_mismatch * 0.10,
+        0.0,
+        1.0,
+    ))
+    phase_safety = float(np.clip(1.0 - phase_instability * 0.55, 0.35, 1.0))
+    transient_safety = float(np.clip(1.0 - transient_smear * 0.45, 0.45, 1.0))
+    return {
+        "score": score,
+        "artifact": artifact,
+        "bleed": bleed,
+        "transient_smear": transient_smear,
+        "phase_instability": phase_instability,
+        "residual_mismatch": residual_mismatch,
+        "phase_safety_factor": phase_safety,
+        "transient_safety_factor": transient_safety,
+        "reasons": reasons[:5],
+    }
+
+
+def build_stem_risk_map(stem_before: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    stems = {name: build_stem_risk_entry(before, name) for name, before in stem_before.items()}
+    scores = [float(item["score"]) for item in stems.values()]
+    average = float(np.mean(scores)) if scores else 0.0
+    maximum = float(np.max(scores)) if scores else 0.0
+    if average < 0.45:
+        decision = "allow_4stem_dsp"
+    elif average <= 0.65:
+        decision = "attenuate_4stem_dsp"
+    else:
+        decision = "fallback"
+    return {
+        "enabled": True,
+        "average": average,
+        "max": maximum,
+        "decision": decision,
+        "stems": stems,
+    }
+
+
+def calculate_stem_safe_amount(
+    base_amount: float,
+    target_weight: float,
+    adaptive_amount: float,
+    risk_entry: dict[str, Any],
+) -> float:
+    risk = float(np.clip(risk_entry.get("score", 0.0), 0.0, 1.0))
+    phase_factor = float(np.clip(risk_entry.get("phase_safety_factor", 1.0), 0.25, 1.0))
+    transient_factor = float(np.clip(risk_entry.get("transient_safety_factor", 1.0), 0.35, 1.0))
+    safe = float(base_amount) * float(target_weight) * float(adaptive_amount) * ((1.0 - risk) ** 2) * phase_factor * transient_factor
+    return float(np.clip(safe, 0.0, STEM_INTENSITY_CAP))
+
+
 def prepare_stem_recommendation(
     stem_before: dict[str, Any],
     stem_sr: int,
@@ -2510,6 +3945,8 @@ def prepare_stem_recommendation(
     requested_intensity: float | None,
     use_denoise: bool,
     output_sr: int,
+    stem_name: str = "stem",
+    stem_risk_entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stem_intensity = None if requested_intensity is None else min(float(requested_intensity), STEM_INTENSITY_CAP)
     recommendation = prepare_recommendation_for_request(
@@ -2526,6 +3963,19 @@ def prepare_stem_recommendation(
     recommendation["output_sr"] = int(output_sr)
     recommendation["model_denoise"] = False
     recommendation["stem_processing"] = True
+    stem_risk_entry = stem_risk_entry or build_stem_risk_entry(stem_before, stem_name)
+    artifact_risk = float(stem_risk_entry.get("score", 0.0))
+    artifact_reasons = list(stem_risk_entry.get("reasons", []))
+    base_amount = STEM_VOCAL_INTENSITY_CAP if stem_name == "vocals" else STEM_INTENSITY_CAP
+    target_weight = 1.0 if stem_name in {"vocals", "instrumental"} else 0.92
+    safe_amount = calculate_stem_safe_amount(
+        base_amount,
+        target_weight,
+        float(recommendation.get("adaptive_ai", {}).get("effective", recommendation.get("ai_amount", STEM_INTENSITY_CAP))),
+        stem_risk_entry,
+    )
+    recommendation["intensity"] = min(float(recommendation.get("intensity", safe_amount)), safe_amount)
+    recommendation["ai_amount"] = min(float(recommendation.get("ai_amount", safe_amount)), safe_amount)
 
     params = dict(recommendation["dsp_params"])
     params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -1.8)
@@ -2540,14 +3990,104 @@ def prepare_stem_recommendation(
         params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.025)
         params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.015)
         recommendation["reasons"].append("Vocal stem uses bleed-safe conservative tone shaping.")
+    if artifact_risk >= 0.22:
+        reduction = float(np.clip(1.0 - artifact_risk * 0.38, 0.70, 0.94))
+        recommendation["intensity"] = float(recommendation["intensity"]) * reduction
+        recommendation["ai_amount"] = float(recommendation["ai_amount"]) * reduction
+        params["compress_ratio"] = 1.0 + (float(params.get("compress_ratio", 1.0)) - 1.0) * reduction
+        params["exciter_amount"] = float(params.get("exciter_amount", 0.0)) * reduction
+        params["saturation_amount"] = float(params.get("saturation_amount", 0.0)) * reduction
+        recommendation["stem_artifact_risk"] = {
+            "score": artifact_risk,
+            "reduction": reduction,
+            "reasons": artifact_reasons[:4],
+            "risk_map": stem_risk_entry,
+            "stem_safe_amount": safe_amount,
+        }
+        recommendation["reasons"].append("Stem artifact risk reduced per-stem processing strength.")
+    else:
+        recommendation["stem_artifact_risk"] = {
+            "score": artifact_risk,
+            "reduction": 1.0,
+            "reasons": artifact_reasons[:4],
+            "risk_map": stem_risk_entry,
+            "stem_safe_amount": safe_amount,
+        }
     recommendation["dsp_params"] = clamp_dsp_params(params)
     recommendation["reasons"].append("Stem processing uses conservative intensity to limit separation artifacts.")
     return recommendation
 
 
+def apply_stem_role_tuning(recommendation: dict[str, Any], stem_name: str) -> dict[str, Any]:
+    tuned = dict(recommendation)
+    params = dict(tuned["dsp_params"])
+
+    if stem_name == "vocals":
+        tuned["intensity"] = min(float(tuned.get("intensity", STEM_VOCAL_INTENSITY_CAP)), STEM_VOCAL_INTENSITY_CAP)
+        tuned["ai_amount"] = min(float(tuned.get("ai_amount", STEM_VOCAL_INTENSITY_CAP)), STEM_VOCAL_INTENSITY_CAP)
+        params["lowcut_hz"] = max(float(params.get("lowcut_hz", 80.0)), 115.0)
+        params["low_boost_db"] = min(float(params.get("low_boost_db", 0.0)), 0.0)
+        params["high_boost_db"] = float(np.clip(float(params.get("high_boost_db", 0.0)), 0.2, 0.85))
+        params["compress_ratio"] = min(float(params.get("compress_ratio", 1.0)), 1.28)
+        params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.018)
+        params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.012)
+        params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -2.0)
+        tuned["reasons"].append("Vocal stem tuning prioritizes clarity, sibilance safety, and bleed control.")
+    elif stem_name == "drums":
+        tuned["intensity"] = min(float(tuned.get("intensity", STEM_INTENSITY_CAP)), 0.32)
+        tuned["ai_amount"] = min(float(tuned.get("ai_amount", STEM_INTENSITY_CAP)), 0.32)
+        params["lowcut_hz"] = min(float(params.get("lowcut_hz", 35.0)), 32.0)
+        params["low_boost_db"] = float(np.clip(float(params.get("low_boost_db", 0.0)), -0.2, 0.7))
+        params["mid_cut_db"] = float(np.clip(float(params.get("mid_cut_db", 0.0)), -0.5, 0.3))
+        params["high_boost_db"] = float(np.clip(float(params.get("high_boost_db", 0.0)), -0.1, 0.55))
+        params["compress_ratio"] = min(float(params.get("compress_ratio", 1.0)), 1.22)
+        params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.014)
+        params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.02)
+        params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -2.0)
+        tuned["reasons"].append("Drum stem tuning preserves transient impact and avoids over-compression.")
+    elif stem_name == "bass":
+        tuned["intensity"] = min(float(tuned.get("intensity", STEM_INTENSITY_CAP)), 0.38)
+        tuned["ai_amount"] = min(float(tuned.get("ai_amount", STEM_INTENSITY_CAP)), 0.38)
+        params["lowcut_hz"] = float(np.clip(float(params.get("lowcut_hz", 30.0)), 24.0, 34.0))
+        params["low_boost_db"] = float(np.clip(float(params.get("low_boost_db", 1.4)), 0.7, 2.1))
+        params["mid_cut_db"] = float(np.clip(float(params.get("mid_cut_db", -0.2)), -0.6, 0.2))
+        params["high_boost_db"] = min(float(params.get("high_boost_db", 0.0)), 0.15)
+        params["compress_ratio"] = float(np.clip(float(params.get("compress_ratio", 1.0)), 1.12, 1.55))
+        params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.01)
+        params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.03)
+        params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -2.1)
+        tuned["reasons"].append("Bass stem tuning focuses low-end weight while protecting phase and headroom.")
+    elif stem_name == "other":
+        tuned["intensity"] = min(float(tuned.get("intensity", STEM_INTENSITY_CAP)), 0.30)
+        tuned["ai_amount"] = min(float(tuned.get("ai_amount", STEM_INTENSITY_CAP)), 0.30)
+        params["lowcut_hz"] = max(float(params.get("lowcut_hz", 45.0)), 48.0)
+        params["low_boost_db"] = float(np.clip(float(params.get("low_boost_db", 0.0)), -0.4, 0.35))
+        params["mid_cut_db"] = float(np.clip(float(params.get("mid_cut_db", 0.0)), -0.4, 0.2))
+        params["high_boost_db"] = float(np.clip(float(params.get("high_boost_db", 0.0)), -0.2, 0.65))
+        params["compress_ratio"] = min(float(params.get("compress_ratio", 1.0)), 1.18)
+        params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.018)
+        params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.018)
+        params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -2.0)
+        tuned["reasons"].append("Other stem tuning preserves ambience and stereo cues.")
+    elif stem_name == "instrumental":
+        tuned["intensity"] = min(float(tuned.get("intensity", STEM_INTENSITY_CAP)), 0.40)
+        tuned["ai_amount"] = min(float(tuned.get("ai_amount", STEM_INTENSITY_CAP)), 0.40)
+        params["high_boost_db"] = min(float(params.get("high_boost_db", 0.0)), 0.85)
+        params["compress_ratio"] = min(float(params.get("compress_ratio", 1.0)), 1.35)
+        params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.035)
+        params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.035)
+        params["limiter_ceiling_db"] = min(float(params.get("limiter_ceiling_db", -1.5)), -2.0)
+        tuned["reasons"].append("Instrumental stem tuning keeps backing balance and staging stable.")
+
+    tuned["dsp_params"] = clamp_dsp_params(params)
+    tuned["stem_role_policy"] = STEM_ROLE_POLICY.get(stem_name, "balanced_stem")
+    return tuned
+
+
 def finalize_stem_remix(
     mixed_audio: np.ndarray,
     source_audio: np.ndarray,
+    source_sr: int,
     output_sr: int,
     recommendation: dict[str, Any],
 ) -> tuple[np.ndarray, list[str]]:
@@ -2591,6 +4131,20 @@ def finalize_stem_remix(
         if gain_limited:
             steps.append("stem_remix_target_gain_limited")
 
+    if source_audio.ndim == 2 and source_audio.shape[0] == 2:
+        source_ref = prepare_stem_for_mix(
+            source_audio,
+            source_sr,
+            output_sr,
+            2,
+            as_channel_matrix(mixed_audio).shape[-1],
+        )
+        mixed_audio, stereo_guard_info = apply_multiband_stereo_guard(source_ref, mixed_audio, output_sr)
+        if stereo_guard_info.get("applied"):
+            steps.append("stem_remix_multiband_stereo_guard_" + "_".join(item["band"] for item in stereo_guard_info.get("bands", [])))
+        else:
+            steps.append("stem_remix_multiband_stereo_checked")
+
     mixed_audio, safety_steps = finalize_output_safety(
         mixed_audio,
         output_sr,
@@ -2615,14 +4169,25 @@ def process_stem_separated_audio(
     bit_depth: str,
     stem_mode: str,
     stem_quality: str = "balanced",
+    job_id: str | None = None,
+    allow_precision_stems: bool = False,
 ) -> tuple[np.ndarray, int, list[str], dict[str, Any]]:
     started_at = time.perf_counter()
-    stem_quality = resolve_stem_quality_mode(stem_quality)
-    stem_paths, work_dir = run_demucs_stems(input_path, stem_mode, stem_quality)
+    stem_quality = resolve_stem_quality_mode(stem_quality, allow_precision=allow_precision_stems)
+    raise_if_cancelled(job_id)
+    stem_paths, work_dir = run_demucs_stems(
+        input_path,
+        stem_mode,
+        stem_quality,
+        job_id=job_id,
+        allow_precision=allow_precision_stems,
+    )
     steps: list[str] = [f"demucs_{stem_mode}_{stem_quality}_separation"]
 
     try:
         logger.info("[STEM] Loading separated stems.")
+        update_processing_job(job_id, percent=38, stage="분리된 stem 로드 중 (Loading separated stems)")
+        raise_if_cancelled(job_id)
         stem_audio: dict[str, np.ndarray] = {}
         stem_sr: dict[str, int] = {}
         stem_before: dict[str, dict[str, Any]] = {}
@@ -2637,7 +4202,16 @@ def process_stem_separated_audio(
             raw_output_filename = f"{task_id}_{stem_name}_raw.wav"
             stem_raw_filenames[stem_name] = raw_output_filename
 
+        stem_risk_map = build_stem_risk_map(stem_before)
+        steps.append(f"stem_risk_map_avg_{stem_risk_map['average']:.2f}_max_{stem_risk_map['max']:.2f}")
+        if stem_mode == "4stem" and float(stem_risk_map["average"]) > 0.65:
+            raise StemRiskFallback("2stem", stem_risk_map)
+        if stem_mode == "2stem" and float(stem_risk_map["average"]) > 0.72:
+            raise StemRiskFallback("fullmix", stem_risk_map)
+
         logger.info("[STEM] Writing raw separated stem downloads.")
+        update_processing_job(job_id, percent=46, stage="분리 stem 다운로드 파일 생성 중 (Writing raw stems)")
+        raise_if_cancelled(job_id)
         for stem_name, stem_path in stem_paths.items():
             shutil.copyfile(stem_path, os.path.join(OUTPUT_DIR, stem_raw_filenames[stem_name]))
 
@@ -2674,8 +4248,21 @@ def process_stem_separated_audio(
         stem_recommendations: dict[str, dict[str, Any]] = {}
         stem_gain_adjustments: dict[str, dict[str, Any]] = {}
         stem_chain_started_at = time.perf_counter()
+        stem_progress = {
+            "vocals": 54,
+            "instrumental": 66,
+            "drums": 62,
+            "bass": 72,
+            "other": 82,
+        }
 
         for stem_name in stem_paths:
+            update_processing_job(
+                job_id,
+                percent=stem_progress.get(stem_name, 64),
+                stage=f"{stem_name} stem 개선 중 (Enhancing {stem_name} stem)",
+            )
+            raise_if_cancelled(job_id)
             stem_input = vocal_audio_for_processing if stem_name == "vocals" else stem_audio[stem_name]
             stem_target = stem_targets.get(stem_name, target)
             recommendation_for_stem = prepare_stem_recommendation(
@@ -2685,19 +4272,10 @@ def process_stem_separated_audio(
                 intensity,
                 use_denoise,
                 output_sr,
+                stem_name,
+                (stem_risk_map.get("stems") or {}).get(stem_name),
             )
-            if stem_name == "drums":
-                params = dict(recommendation_for_stem["dsp_params"])
-                params["high_boost_db"] = min(float(params.get("high_boost_db", 0.0)), 0.6)
-                params["compress_ratio"] = min(float(params.get("compress_ratio", 1.0)), 1.45)
-                params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.02)
-                recommendation_for_stem["dsp_params"] = clamp_dsp_params(params)
-            elif stem_name == "bass":
-                params = dict(recommendation_for_stem["dsp_params"])
-                params["high_boost_db"] = min(float(params.get("high_boost_db", 0.0)), 0.35)
-                params["exciter_amount"] = min(float(params.get("exciter_amount", 0.0)), 0.015)
-                params["saturation_amount"] = min(float(params.get("saturation_amount", 0.0)), 0.035)
-                recommendation_for_stem["dsp_params"] = clamp_dsp_params(params)
+            recommendation_for_stem = apply_stem_role_tuning(recommendation_for_stem, stem_name)
 
             logger.info("[STEM] Processing %s stem.", stem_name)
             processed_audio, processed_sr, stem_steps = process_audio_chain(
@@ -2734,15 +4312,28 @@ def process_stem_separated_audio(
         logger.info("[STEM] Stem DSP completed in %.1fs.", time.perf_counter() - stem_chain_started_at)
 
         logger.info("[STEM] Writing processed stem downloads.")
+        update_processing_job(job_id, percent=86, stage="개선 stem 다운로드 파일 생성 중 (Writing enhanced stems)")
+        raise_if_cancelled(job_id)
         for stem_name, (processed_audio, processed_sr) in processed_stems.items():
             output_filename = f"{task_id}_{stem_name}_enhanced.wav"
             stem_enhanced_filenames[stem_name] = output_filename
             write_audio(os.path.join(OUTPUT_DIR, output_filename), processed_audio, processed_sr, bit_depth=bit_depth)
 
         logger.info("[STEM] Remixing stems and applying final safety.")
-        mixed_audio = remix_processed_stem_map(processed_stems, source_audio, source_sr, output_sr)
+        update_processing_job(job_id, percent=90, stage="Stem 재합성 및 최종 안전 처리 중 (Remixing and final safety)")
+        raise_if_cancelled(job_id)
+        mixed_audio, remix_optimization = optimize_stem_remix_against_source(
+            processed_stems,
+            source_audio,
+            source_sr,
+            output_sr,
+        )
         steps.append("stem_align_sample_rate_channels_length")
-        steps.append("stem_remix_gain_" + "_".join(f"{name}_{STEM_REMIX_GAINS.get(name, 0.95):.2f}" for name in processed_stems))
+        if remix_optimization.get("applied"):
+            optimized_gains = remix_optimization.get("gains", {})
+            steps.append("stem_remix_optimized_gain_" + "_".join(f"{name}_{float(optimized_gains.get(name, STEM_REMIX_GAINS.get(name, 0.95))):.2f}" for name in processed_stems))
+        else:
+            steps.append("stem_remix_gain_" + "_".join(f"{name}_{STEM_REMIX_GAINS.get(name, 0.95):.2f}" for name in processed_stems))
         mixed_audio, residual_info = apply_stem_residual_preservation(
             mixed_audio,
             stem_audio,
@@ -2750,6 +4341,7 @@ def process_stem_separated_audio(
             source_audio,
             source_sr,
             output_sr,
+            stem_risk_map,
         )
         if residual_info.get("applied"):
             steps.append(f"stem_source_residual_preserved_{residual_info.get('blend_gain_db', 0.0):+.1f}db")
@@ -2757,7 +4349,7 @@ def process_stem_separated_audio(
                 steps.append(f"stem_residual_low_bass_phase_guard_{residual_info['low_bass_side_gain_db']:+.1f}db")
         else:
             steps.append(f"stem_source_residual_skipped_{residual_info.get('reason', 'unknown')}")
-        mixed_audio, final_steps = finalize_stem_remix(mixed_audio, source_audio, output_sr, recommendation)
+        mixed_audio, final_steps = finalize_stem_remix(mixed_audio, source_audio, source_sr, output_sr, recommendation)
         for stem_name, stem_steps in processed_steps.items():
             steps.extend([f"{stem_name}_{step}" for step in stem_steps[:12]])
         steps.extend(final_steps)
@@ -2770,21 +4362,39 @@ def process_stem_separated_audio(
                 "after_lufs": analyze_array(processed_audio, processed_sr).get("lufs"),
                 "sr": processed_sr,
                 "steps": processed_steps[stem_name],
+                "role_policy": STEM_ROLE_POLICY.get(stem_name, "balanced_stem"),
+                "artifact_risk": stem_recommendations.get(stem_name, {}).get("stem_artifact_risk", {}),
                 "auto_gain_balance": stem_gain_adjustments.get(stem_name, {}),
                 "download_filename": stem_enhanced_filenames[stem_name],
                 "raw_download_filename": stem_raw_filenames[stem_name],
                 "enhanced_download_filename": stem_enhanced_filenames[stem_name],
             }
 
+        artifact_scores = [
+            float((item.get("artifact_risk") or {}).get("score", 0.0))
+            for item in stem_report_items.values()
+        ]
+        artifact_guard_summary = {
+            "max_score": max(artifact_scores) if artifact_scores else 0.0,
+            "guarded_stems": [
+                stem_name
+                for stem_name, item in stem_report_items.items()
+                if float((item.get("artifact_risk") or {}).get("reduction", 1.0)) < 0.995
+            ],
+        }
         stem_report = {
             "enabled": True,
             "mode": stem_mode,
             "quality_mode": stem_quality,
             "engine": "demucs",
             "stems": stem_report_items,
-            "remix_gains": {name: STEM_REMIX_GAINS.get(name, 0.95) for name in processed_stems},
+            "remix_gains": remix_optimization.get("gains") or {name: STEM_REMIX_GAINS.get(name, 0.95) for name in processed_stems},
+            "remix_optimization": remix_optimization,
             "auto_gain_balance": stem_gain_adjustments,
-            "artifact_guard": "conservative_stem_intensity_vocal_bleed_cleanup_and_source_residual_preservation",
+            "artifact_guard": "adaptive_stem_artifact_risk_conservative_intensity_vocal_bleed_cleanup_and_source_residual_preservation",
+            "artifact_guard_summary": artifact_guard_summary,
+            "stem_risk_map": stem_risk_map,
+            "role_policy": {name: STEM_ROLE_POLICY.get(name, "balanced_stem") for name in processed_stems},
             "vocal_bleed_cleanup": vocal_cleanup_applied,
             "source_residual_preservation": residual_info,
         }
@@ -2795,6 +4405,7 @@ def process_stem_separated_audio(
             "vocal_target": "voice_focus",
             "instrumental_target": target,
             "stem_targets": {name: stem_targets.get(name, target) for name in processed_stems},
+            "stem_risk_map": stem_risk_map,
         }
         recommendation["reasons"].append(f"Applied Demucs {stem_mode} {stem_quality} separation before final remix.")
         if stem_mode == "4stem":
@@ -2823,13 +4434,19 @@ def process_saved_audio(
     output_bit_depth: str | None = "24",
     stem_separation: str | None = "off",
     stem_quality: str | None = "balanced",
+    job_id: str | None = None,
+    allow_precision_stems: bool = False,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     task_id = os.path.splitext(os.path.basename(input_path))[0]
     output_filename = f"{task_id}_enhanced.wav"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
 
+    update_processing_job(job_id, percent=8, stage="원본 음원 분석 중 (Analyzing source audio)")
+    raise_if_cancelled(job_id)
     audio, sr, before = analyze_audio_file(input_path)
+    update_processing_job(job_id, percent=14, stage="청감 목표와 DSP 설계 중 (Designing processing)")
+    raise_if_cancelled(job_id)
     recommendation = prepare_recommendation_for_request(
         before,
         sr,
@@ -2847,7 +4464,10 @@ def process_saved_audio(
     )
     recommendation["output_bit_depth"] = bit_depth
     stem_mode = resolve_stem_separation_mode(stem_separation)
-    stem_quality_mode = resolve_stem_quality_mode(stem_quality)
+    requested_stem_quality = (stem_quality or "balanced").strip().lower()
+    stem_quality_mode = resolve_stem_quality_mode(stem_quality, allow_precision=allow_precision_stems)
+    if requested_stem_quality == "precision" and stem_quality_mode != "precision":
+        recommendation["reasons"].append("Precision stem quality is desktop-only by default; used balanced policy.")
     stem_report: dict[str, Any] | None = None
     if stem_mode in {"2stem", "4stem"}:
         try:
@@ -2865,7 +4485,59 @@ def process_saved_audio(
                 bit_depth,
                 stem_mode,
                 stem_quality_mode,
+                job_id=job_id,
+                allow_precision_stems=allow_precision_stems,
             )
+        except StemRiskFallback as risk_fallback:
+            if risk_fallback.target_mode == "2stem":
+                recommendation["reasons"].append("4-stem risk map exceeded safety threshold; retried as 2-stem.")
+                try:
+                    processed, output_sr, steps, stem_report = process_stem_separated_audio(
+                        input_path,
+                        audio,
+                        sr,
+                        before,
+                        recommendation,
+                        target,
+                        intensity,
+                        use_denoise,
+                        int(recommendation["output_sr"]),
+                        task_id,
+                        bit_depth,
+                        "2stem",
+                        stem_quality_mode,
+                        job_id=job_id,
+                        allow_precision_stems=allow_precision_stems,
+                    )
+                    steps.insert(0, "4stem_risk_fallback_to_2stem")
+                    if stem_report is not None:
+                        stem_report["requested_mode"] = "4stem"
+                        stem_report["fallback_mode"] = "2stem"
+                        stem_report["fallback_reason"] = "stem_risk_map"
+                        stem_report["fallback_risk_map"] = risk_fallback.risk_map
+                except StemRiskFallback as second_risk_fallback:
+                    recommendation["reasons"].append("2-stem risk also exceeded safety threshold; used full-mix DSP fallback.")
+                    update_processing_job(job_id, percent=34, stage="Stem 위험도 높음, 전체 믹스 보수 처리 중 (Stem bypass fallback)")
+                    processed, output_sr, steps = process_audio_chain(audio, sr, recommendation)
+                    steps.insert(0, "stem_risk_bypass_to_fullmix")
+                    stem_report = {
+                        "enabled": False,
+                        "bypassed": True,
+                        "fallback_reason": "stem_risk_map",
+                        "fallback_risk_map": second_risk_fallback.risk_map,
+                        "previous_risk_map": risk_fallback.risk_map,
+                    }
+            else:
+                recommendation["reasons"].append("Stem branch risk exceeded safety threshold; used full-mix DSP fallback.")
+                update_processing_job(job_id, percent=34, stage="Stem 위험도 높음, 전체 믹스 보수 처리 중 (Stem bypass fallback)")
+                processed, output_sr, steps = process_audio_chain(audio, sr, recommendation)
+                steps.insert(0, "stem_risk_bypass_to_fullmix")
+                stem_report = {
+                    "enabled": False,
+                    "bypassed": True,
+                    "fallback_reason": "stem_risk_map",
+                    "fallback_risk_map": risk_fallback.risk_map,
+                }
         except Exception as exc:
             if stem_quality_mode == "precision":
                 logger.exception("[STEM] Precision stem quality failed. Falling back to balanced.")
@@ -2885,6 +4557,8 @@ def process_saved_audio(
                         bit_depth,
                         stem_mode,
                         "balanced",
+                        job_id=job_id,
+                        allow_precision_stems=allow_precision_stems,
                     )
                     if stem_report is not None:
                         stem_report["requested_quality_mode"] = "precision"
@@ -2909,6 +4583,8 @@ def process_saved_audio(
                         bit_depth,
                         "2stem",
                         "balanced",
+                        job_id=job_id,
+                        allow_precision_stems=allow_precision_stems,
                     )
                     steps.insert(0, "4stem_fallback_to_2stem")
                     if stem_report is not None:
@@ -2936,6 +4612,8 @@ def process_saved_audio(
                     bit_depth,
                     "2stem",
                     stem_quality_mode,
+                    job_id=job_id,
+                    allow_precision_stems=allow_precision_stems,
                 )
                 steps.insert(0, "4stem_fallback_to_2stem")
                 if stem_report is not None:
@@ -2943,8 +4621,12 @@ def process_saved_audio(
                     stem_report["fallback_mode"] = "2stem"
                     stem_report["fallback_reason"] = str(exc)[:240]
     else:
+        update_processing_job(job_id, percent=34, stage="AI 음질 복원 처리 중 (Restoring audio)")
+        raise_if_cancelled(job_id)
         processed, output_sr, steps = process_audio_chain(audio, sr, recommendation)
 
+    update_processing_job(job_id, percent=92, stage="최종 품질 보호 및 헤드룸 검사 중 (Final quality guard)")
+    raise_if_cancelled(job_id)
     processed, quality_guard_steps, after, quality_guard = apply_post_quality_guard(
         processed,
         audio,
@@ -2956,8 +4638,11 @@ def process_saved_audio(
     steps.extend(quality_guard_steps)
 
     logger.info("[PROCESS] Writing enhanced audio: %s", output_filename)
+    update_processing_job(job_id, percent=96, stage="출력 파일 저장 중 (Writing output file)")
+    raise_if_cancelled(job_id)
     write_audio(output_path, processed, output_sr, bit_depth=bit_depth)
     logger.info("[PROCESS] Building analysis report.")
+    update_processing_job(job_id, percent=98, stage="분석 리포트 생성 중 (Building analysis report)")
     report = build_comparison_report(before, after, recommendation, steps)
     report["quality_guard"] = quality_guard
     if stem_report is not None:
@@ -3023,6 +4708,138 @@ def build_stem_downloads(result: dict[str, Any]) -> list[dict[str, str]]:
     return downloads
 
 
+def build_process_payload(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "download_url": build_download_url(result["output_filename"], result["download_name"]),
+        "filename": result["download_name"],
+        "stem_downloads": build_stem_downloads(result),
+        "report": result["report"],
+    }
+
+
+def process_saved_batch_audio(
+    saved_files: list[dict[str, str]],
+    target: str,
+    intensity: float | None,
+    use_denoise: bool,
+    volume_mode: str,
+    dsp_params: str | None = None,
+    output_sample_rate: str | None = "auto",
+    output_bit_depth: str | None = "24",
+    stem_separation: str | None = "off",
+    stem_quality: str | None = "balanced",
+    job_id: str | None = None,
+    allow_precision_stems: bool = False,
+) -> dict[str, Any]:
+    batch_id = str(uuid.uuid4())
+    zip_filename = f"{batch_id}_resonix_batch.zip"
+    zip_path = os.path.join(OUTPUT_DIR, zip_filename)
+    results: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    total = max(len(saved_files), 1)
+
+    for index, item in enumerate(saved_files, start=1):
+        raise_if_cancelled(job_id)
+        update_processing_job(
+            job_id,
+            percent=max(4, min(92, int((index - 1) / total * 88) + 4)),
+            stage=f"배치 {index}/{total} 처리 중 (Processing batch item {index}/{total})",
+        )
+        result = process_saved_audio(
+            item["input_path"],
+            item["filename"],
+            target,
+            intensity,
+            use_denoise,
+            volume_mode,
+            dsp_params,
+            output_sample_rate=output_sample_rate,
+            output_bit_depth=output_bit_depth,
+            stem_separation=stem_separation,
+            stem_quality=stem_quality,
+            job_id=job_id,
+            allow_precision_stems=allow_precision_stems,
+        )
+        base_download_name = result["download_name"]
+        arcname = base_download_name
+        if arcname in used_names:
+            stem, suffix = os.path.splitext(base_download_name)
+            arcname = f"{stem}_{index:02d}{suffix}"
+        used_names.add(arcname)
+        result["archive_name"] = arcname
+        results.append(result)
+
+    raise_if_cancelled(job_id)
+    update_processing_job(job_id, percent=96, stage="배치 ZIP 생성 중 (Creating batch ZIP)")
+    batch_report = {
+        "count": len(results),
+        "target": target,
+        "ai_amount": intensity,
+        "volume_mode": volume_mode,
+        "output_sample_rate": output_sample_rate,
+        "output_bit_depth": resolve_output_bit_depth(output_bit_depth),
+        "manual_dsp": dsp_params is not None,
+        "stem_separation": resolve_stem_separation_mode(stem_separation),
+        "stem_quality": resolve_stem_quality_mode(stem_quality, allow_precision=allow_precision_stems),
+        "items": [
+            {
+                "source_filename": item["source_filename"],
+                "archive_name": item["archive_name"],
+                "download_url": build_download_url(item["output_filename"], item["download_name"]),
+                "filename": item["download_name"],
+                "stem_downloads": build_stem_downloads(item),
+                "report": item["report"],
+            }
+            for item in results
+        ],
+    }
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive_names = set(used_names)
+        for item in results:
+            archive.write(item["output_path"], arcname=item["archive_name"])
+            archive_names.add(item["archive_name"])
+            for stem_download in build_stem_downloads(item):
+                stem_output_filename = os.path.basename(stem_download.get("output_filename", ""))
+                stem_output_path = os.path.join(OUTPUT_DIR, stem_output_filename)
+                if not stem_output_filename or not os.path.exists(stem_output_path):
+                    continue
+                stem_arcname = stem_download["filename"]
+                if stem_arcname in archive_names:
+                    stem, suffix = os.path.splitext(stem_arcname)
+                    stem_arcname = f"{stem}_{len(archive_names):02d}{suffix}"
+                archive_names.add(stem_arcname)
+                archive.write(stem_output_path, arcname=stem_arcname)
+        archive.writestr("batch_report.json", json.dumps(batch_report, ensure_ascii=False, indent=2))
+
+    summary = [
+        {
+            "index": index,
+            "source_filename": item["source_filename"],
+            "archive_name": item["archive_name"],
+            "download_url": build_download_url(item["output_filename"], item["download_name"]),
+            "filename": item["download_name"],
+            "stem_downloads": build_stem_downloads(item),
+            "lufs": item["report"]["after"]["lufs"],
+            "true_peak_db": item["report"]["after"]["true_peak_db"],
+            "sr": item["report"]["after"]["sr"],
+            "bit_depth": item["report"]["output_format"]["bit_depth"],
+            "channels": item["report"]["after"]["channels"],
+            "targets": item["report"]["recommendation"].get("targets")
+            or [item["report"]["recommendation"].get("target", target)],
+            "report": item["report"],
+        }
+        for index, item in enumerate(results)
+    ]
+
+    return {
+        "download_url": build_download_url(zip_filename, "ResonixAI_Batch.zip"),
+        "filename": "ResonixAI_Batch.zip",
+        "count": len(results),
+        "summary": summary,
+    }
+
+
 UPSAMPLER_MODEL_PATH = get_resource_path(os.path.join("models", "light_upsampler.onnx"))
 GTCRN_MODEL_PATH = get_resource_path(os.path.join("models", "gtcrn.onnx"))
 upsampler_session = initialize_onnx_session(UPSAMPLER_MODEL_PATH)
@@ -3044,6 +4861,122 @@ async def analyze_audio(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Audio analysis failed: {exc}") from exc
     finally:
         gc.collect()
+
+
+@app.post("/api/jobs/process")
+async def start_process_job(
+    request: Request,
+    file: UploadFile = File(...),
+    target: str = Form("hifi_clean"),
+    intensity: float | None = Form(None),
+    use_denoise: bool = Form(True),
+    volume_mode: str = Form("match_source"),
+    dsp_params: str | None = Form(None),
+    output_sample_rate: str = Form("auto"),
+    output_bit_depth: str = Form("24"),
+    stem_separation: str = Form("off"),
+    stem_quality: str = Form("balanced"),
+):
+    original_filename = file.filename or "audio"
+    allow_precision_stems = allow_precision_for_client(request.client.host if request.client else None)
+    ext = validate_audio_file(file.filename)
+    input_path = save_upload(file, ext)
+    job_id = create_processing_job("single")
+    update_processing_job(job_id, percent=1, stage="업로드 완료, 작업 대기 중 (Upload saved, queued)")
+    JOB_EXECUTOR.submit(
+        run_processing_job,
+        job_id,
+        lambda job_id=None: build_process_payload(
+            process_saved_audio(
+                input_path,
+                original_filename,
+                target,
+                intensity,
+                use_denoise,
+                volume_mode,
+                dsp_params,
+                output_sample_rate,
+                output_bit_depth,
+                stem_separation,
+                stem_quality,
+                job_id=job_id,
+                allow_precision_stems=allow_precision_stems,
+            )
+        ),
+    )
+    return get_processing_job(job_id)
+
+
+@app.post("/api/jobs/process-batch")
+async def start_batch_process_job(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    target: str = Form("hifi_clean"),
+    intensity: float | None = Form(None),
+    use_denoise: bool = Form(True),
+    volume_mode: str = Form("match_source"),
+    dsp_params: str | None = Form(None),
+    output_sample_rate: str = Form("auto"),
+    output_bit_depth: str = Form("24"),
+    stem_separation: str = Form("off"),
+    stem_quality: str = Form("balanced"),
+):
+    allow_precision_stems = allow_precision_for_client(request.client.host if request.client else None)
+    if not files:
+        raise HTTPException(status_code=400, detail="No audio files were uploaded.")
+    if len(files) > 30:
+        raise HTTPException(status_code=400, detail="Batch processing supports up to 30 files at once.")
+
+    saved_files: list[dict[str, str]] = []
+    for file in files:
+        ext = validate_audio_file(file.filename)
+        saved_files.append({"input_path": save_upload(file, ext), "filename": file.filename or "audio"})
+
+    job_id = create_processing_job("batch")
+    update_processing_job(job_id, percent=1, stage="배치 업로드 완료, 작업 대기 중 (Batch upload saved, queued)")
+    JOB_EXECUTOR.submit(
+        run_processing_job,
+        job_id,
+        process_saved_batch_audio,
+        saved_files,
+        target,
+        intensity,
+        use_denoise,
+        volume_mode,
+        dsp_params,
+        output_sample_rate,
+        output_bit_depth,
+        stem_separation,
+        stem_quality,
+        allow_precision_stems=allow_precision_stems,
+    )
+    return get_processing_job(job_id)
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    return get_processing_job(job_id)
+
+
+@app.delete("/api/jobs/{job_id}")
+async def cancel_job(job_id: str):
+    job = get_processing_job(job_id)
+    pid = job.get("active_process_pid")
+    with JOB_LOCK:
+        current = JOBS.get(job_id)
+        if current and current["status"] in {"queued", "running"}:
+            current["cancel_requested"] = True
+            current["stage"] = "취소 요청 중 (Cancelling)"
+            current["updated_at"] = time.time()
+            if current["status"] == "queued":
+                current["status"] = "cancelled"
+                current["error"] = "Processing was cancelled before it started."
+    if pid:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True, text=True)
+        except Exception:
+            logger.warning("[JOB] Failed to terminate subprocess for job %s.", job_id, exc_info=True)
+    return get_processing_job(job_id)
 
 
 @app.post("/api/recommend")
@@ -3071,8 +5004,44 @@ async def recommend_audio(
         gc.collect()
 
 
+@app.post("/api/preview-targets")
+async def preview_targets(
+    file: UploadFile = File(...),
+    targets: str = Form("hifi_clean,warm_analog,bass_boost"),
+    intensity: float | None = Form(None),
+    use_denoise: bool = Form(True),
+    volume_mode: str = Form("match_source"),
+    output_sample_rate: str = Form("auto"),
+    output_bit_depth: str = Form("24"),
+):
+    ext = validate_audio_file(file.filename)
+    original_filename = file.filename or "audio"
+    input_path = save_upload(file, ext)
+    try:
+        target_list = [item.strip() for item in targets.split(",") if item.strip()]
+        result = process_preset_previews(
+            input_path,
+            original_filename,
+            target_list,
+            intensity,
+            use_denoise,
+            volume_mode,
+            output_sample_rate,
+            output_bit_depth,
+        )
+        return sanitize_json_value(result)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[ERROR] Preset preview failed.")
+        raise HTTPException(status_code=500, detail=f"Preset preview failed: {exc}") from exc
+    finally:
+        gc.collect()
+
+
 @app.post("/api/process")
 async def process_audio(
+    request: Request,
     file: UploadFile = File(...),
     target: str = Form("hifi_clean"),
     intensity: float | None = Form(None),
@@ -3084,6 +5053,18 @@ async def process_audio(
     stem_separation: str = Form("off"),
     stem_quality: str = Form("balanced"),
 ):
+    allow_precision_stems = allow_precision_for_client(request.client.host if request.client else None)
+    request_started_at = time.perf_counter()
+    logger.info(
+        "[PROCESS] Request received: file=%s target=%s stem=%s/%s sr=%s bit=%s volume=%s.",
+        file.filename,
+        target,
+        stem_separation,
+        stem_quality,
+        output_sample_rate,
+        output_bit_depth,
+        volume_mode,
+    )
     ext = validate_audio_file(file.filename)
     input_path = save_upload(file, ext)
 
@@ -3100,6 +5081,12 @@ async def process_audio(
             output_bit_depth,
             stem_separation,
             stem_quality,
+            allow_precision_stems=allow_precision_stems,
+        )
+        logger.info(
+            "[PROCESS] Request finished in %.1fs: %s.",
+            time.perf_counter() - request_started_at,
+            result["output_filename"],
         )
 
         return {
@@ -3119,6 +5106,7 @@ async def process_audio(
 
 @app.post("/api/process-batch")
 async def process_audio_batch(
+    request: Request,
     files: list[UploadFile] = File(...),
     target: str = Form("hifi_clean"),
     intensity: float | None = Form(None),
@@ -3130,6 +5118,18 @@ async def process_audio_batch(
     stem_separation: str = Form("off"),
     stem_quality: str = Form("balanced"),
 ):
+    allow_precision_stems = allow_precision_for_client(request.client.host if request.client else None)
+    request_started_at = time.perf_counter()
+    logger.info(
+        "[BATCH] Request received: files=%s target=%s stem=%s/%s sr=%s bit=%s volume=%s.",
+        len(files),
+        target,
+        stem_separation,
+        stem_quality,
+        output_sample_rate,
+        output_bit_depth,
+        volume_mode,
+    )
     if not files:
         raise HTTPException(status_code=400, detail="No audio files were uploaded.")
     if len(files) > 30:
@@ -3157,6 +5157,7 @@ async def process_audio_batch(
                 output_bit_depth=output_bit_depth,
                 stem_separation=stem_separation,
                 stem_quality=stem_quality,
+                allow_precision_stems=allow_precision_stems,
             )
             base_download_name = result["download_name"]
             arcname = base_download_name
@@ -3176,7 +5177,7 @@ async def process_audio_batch(
             "output_bit_depth": resolve_output_bit_depth(output_bit_depth),
             "manual_dsp": dsp_params is not None,
             "stem_separation": resolve_stem_separation_mode(stem_separation),
-            "stem_quality": resolve_stem_quality_mode(stem_quality),
+            "stem_quality": resolve_stem_quality_mode(stem_quality, allow_precision=allow_precision_stems),
             "items": [
                 {
                     "source_filename": item["source_filename"],
@@ -3243,6 +5244,7 @@ async def process_audio_batch(
         logger.exception("[ERROR] Batch audio processing failed.")
         raise HTTPException(status_code=500, detail=f"Batch audio processing failed: {exc}") from exc
     finally:
+        logger.info("[BATCH] Request finished in %.1fs.", time.perf_counter() - request_started_at)
         gc.collect()
 
 
@@ -3299,13 +5301,20 @@ async def download_output(filename: str, name: str | None = None):
 
 
 @app.get("/api/version")
-async def get_version():
+async def get_version(request: Request):
+    precision_allowed = allow_precision_for_client(request.client.host if request.client else None)
     return {
         "name": "Resonix AI",
         "version": APP_VERSION,
         "app_home": APP_HOME,
         "log_dir": LOG_DIR,
         "distribution": "windows-onedir",
+        "capabilities": {
+            "precision_stems": precision_allowed,
+            "precision_policy": "desktop_local_or_env_opt_in",
+            "stem_quality_modes": ["fast", "balanced"] + (["precision"] if precision_allowed else []),
+            "recommended_stem_quality": "balanced",
+        },
     }
 
 
@@ -3336,14 +5345,27 @@ if __name__ == "__main__":
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
-                    sock.bind(("127.0.0.1", port))
+                    sock.bind(("0.0.0.0", port))
                     return port
                 except OSError:
                     continue
         return start_port
 
+    def get_lan_ip() -> str | None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                return sock.getsockname()[0]
+        except OSError:
+            return None
+
     port = find_available_port()
-    url = f"http://127.0.0.1:{port}/"
-    logger.info("Resonix AI server started at %s", url)
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    host = os.getenv("RESONIX_HOST", "0.0.0.0")
+    local_url = f"http://127.0.0.1:{port}/"
+    lan_ip = get_lan_ip()
+    mobile_url = f"http://{lan_ip}:{port}/" if lan_ip else None
+    logger.info("Resonix AI server started at %s", local_url)
+    if mobile_url:
+        logger.info("Mobile URL on the same Wi-Fi: %s", mobile_url)
+    threading.Timer(1.5, lambda: webbrowser.open(local_url)).start()
+    uvicorn.run(app, host=host, port=port)

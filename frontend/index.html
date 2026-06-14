@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -10,12 +10,17 @@
             --bg: #030408;
             --panel: #0a0f1e;
             --panel-soft: #0f172a;
-            --line: rgba(0, 240, 255, 0.22);
+            --line: rgba(var(--accent-rgb), 0.22);
             --text: #eef8ff;
             --muted: #9fb8cf;
             --accent: #00f0ff;
             --accent-2: #8b5cf6;
             --accent-3: #38bdf8;
+            --accent-rgb: 0, 240, 255;
+            --accent-2-rgb: 139, 92, 246;
+            --accent-3-rgb: 56, 189, 248;
+            --bg-rgb: 3, 4, 8;
+            --panel-rgb: 10, 15, 30;
             --danger: #f472b6;
             --warning: #fbbf24;
             --success: #34d399;
@@ -27,8 +32,8 @@
             margin: 0;
             min-height: 100vh;
             background:
-                linear-gradient(135deg, rgba(0, 240, 255, 0.08), transparent 28%),
-                linear-gradient(315deg, rgba(139, 92, 246, 0.08), transparent 32%),
+                linear-gradient(135deg, rgba(var(--accent-rgb), 0.08), transparent 28%),
+                linear-gradient(315deg, rgba(var(--accent-2-rgb), 0.08), transparent 32%),
                 var(--bg);
             color: var(--text);
             font-family: "Segoe UI", sans-serif;
@@ -93,10 +98,10 @@
             min-height: 24px;
             margin-top: 8px;
             padding: 3px 8px;
-            border: 1px solid rgba(0, 240, 255, 0.22);
+            border: 1px solid rgba(var(--accent-rgb), 0.22);
             border-radius: 999px;
             color: var(--accent);
-            background: rgba(0, 240, 255, 0.05);
+            background: rgba(var(--accent-rgb), 0.05);
             font-size: 0.76rem;
             font-weight: 800;
         }
@@ -116,8 +121,8 @@
         }
 
         .api-status-pill.on {
-            border-color: rgba(0, 240, 255, 0.34);
-            background: rgba(0, 240, 255, 0.08);
+            border-color: rgba(var(--accent-rgb), 0.34);
+            background: rgba(var(--accent-rgb), 0.08);
             color: var(--accent);
         }
 
@@ -131,8 +136,8 @@
             min-height: 30px;
             padding: 0 10px;
             border-radius: 999px;
-            border: 1px solid rgba(0, 240, 255, 0.28);
-            background: rgba(2, 6, 23, 0.92);
+            border: 1px solid rgba(var(--accent-rgb), 0.28);
+            background: rgba(var(--bg-rgb), 0.92);
             color: var(--accent);
             font-size: 0.72rem;
             font-weight: 900;
@@ -151,7 +156,7 @@
             padding: 10px 12px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.84);
+            background: rgba(var(--panel-rgb), 0.84);
         }
 
         .system-chip strong {
@@ -232,11 +237,11 @@
         .ai-intent-main {
             min-height: 136px;
             padding: 16px;
-            border: 1px solid rgba(0, 240, 255, 0.18);
+            border: 1px solid rgba(var(--accent-rgb), 0.18);
             border-radius: 8px;
             background:
-                linear-gradient(135deg, rgba(0, 240, 255, 0.08), rgba(139, 92, 246, 0.06)),
-                rgba(3, 4, 8, 0.42);
+                linear-gradient(135deg, rgba(var(--accent-rgb), 0.08), rgba(var(--accent-2-rgb), 0.06)),
+                rgba(var(--bg-rgb), 0.42);
         }
 
         .ai-intent-main strong {
@@ -262,9 +267,9 @@
             align-items: start;
             min-height: 40px;
             padding: 10px 12px;
-            border: 1px solid rgba(0, 240, 255, 0.12);
+            border: 1px solid rgba(var(--accent-rgb), 0.12);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.72);
+            background: rgba(var(--panel-rgb), 0.72);
         }
 
         .ai-signal span {
@@ -282,7 +287,7 @@
         }
 
         .glass-panel {
-            background: rgba(10, 15, 30, 0.94);
+            background: rgba(var(--panel-rgb), 0.94);
             border: 1px solid var(--line);
             border-radius: 8px;
             padding: 24px;
@@ -299,8 +304,8 @@
         .uploader-section:hover,
         .uploader-section.dragover {
             border-color: var(--accent);
-            background: rgba(0, 240, 255, 0.06);
-            box-shadow: 0 0 26px rgba(0, 240, 255, 0.12);
+            background: rgba(var(--accent-rgb), 0.06);
+            box-shadow: 0 0 26px rgba(var(--accent-rgb), 0.12);
         }
 
         .upload-content {
@@ -317,7 +322,7 @@
             place-items: center;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(0, 240, 255, 0.04);
+            background: rgba(var(--accent-rgb), 0.04);
             color: var(--accent);
         }
 
@@ -343,9 +348,9 @@
             justify-content: space-between;
             gap: 12px;
             padding: 7px 9px;
-            border: 1px solid rgba(0, 240, 255, 0.12);
+            border: 1px solid rgba(var(--accent-rgb), 0.12);
             border-radius: 6px;
-            background: rgba(3, 4, 8, 0.34);
+            background: rgba(var(--bg-rgb), 0.34);
         }
 
         .selected-file-list span:first-child {
@@ -415,7 +420,7 @@
             padding: 14px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.9);
+            background: rgba(var(--panel-rgb), 0.9);
             cursor: pointer;
             transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
         }
@@ -438,8 +443,8 @@
         .target-option input:checked + .target-card,
         .volume-option input:checked + .volume-card {
             border-color: var(--accent);
-            background: rgba(0, 240, 255, 0.08);
-            box-shadow: 0 0 0 1px rgba(0, 240, 255, 0.08);
+            background: rgba(var(--accent-rgb), 0.08);
+            box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.08);
             transform: translateY(-1px);
         }
 
@@ -458,7 +463,7 @@
             padding: 10px 12px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.9);
+            background: rgba(var(--panel-rgb), 0.9);
         }
 
         .checkbox-item input {
@@ -493,7 +498,7 @@
             padding: 8px 10px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.94);
+            background: rgba(var(--panel-rgb), 0.94);
             color: var(--text);
             font: inherit;
         }
@@ -521,7 +526,7 @@
             gap: 10px;
             background: linear-gradient(135deg, var(--accent), var(--accent-2));
             color: #030408;
-            box-shadow: 0 0 24px rgba(0, 240, 255, 0.26);
+            box-shadow: 0 0 24px rgba(var(--accent-rgb), 0.26);
         }
 
         .primary-btn:disabled {
@@ -529,8 +534,75 @@
             opacity: 1;
             color: var(--muted);
             border: 1px solid rgba(159, 184, 207, 0.22);
-            background: rgba(15, 23, 42, 0.56);
+            background: rgba(var(--panel-rgb), 0.56);
             box-shadow: none;
+        }
+
+        .preview-action-panel {
+            display: grid;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .preset-preview-btn {
+            border: 1px solid rgba(var(--accent-rgb), 0.28);
+            background: rgba(var(--panel-rgb), 0.82);
+            color: var(--text);
+        }
+
+        .preset-preview-btn:disabled {
+            cursor: not-allowed;
+            opacity: 0.58;
+        }
+
+        .preset-preview-results {
+            display: grid;
+            gap: 8px;
+        }
+
+        .preset-preview-item {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid rgba(var(--accent-rgb), 0.14);
+            border-radius: 8px;
+            background: rgba(var(--panel-rgb), 0.62);
+        }
+
+        .preset-preview-item strong,
+        .preset-preview-item span {
+            display: block;
+        }
+
+        .preset-preview-item span {
+            color: var(--muted);
+            font-size: 0.78rem;
+            line-height: 1.35;
+        }
+
+        .preset-preview-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .preset-preview-item a,
+        .preset-preview-select {
+            color: var(--accent);
+            font-size: 0.82rem;
+            font-weight: 800;
+            text-decoration: none;
+        }
+
+        .preset-preview-select {
+            border: 1px solid rgba(var(--accent-rgb), 0.26);
+            border-radius: 999px;
+            background: rgba(var(--accent-rgb), 0.08);
+            cursor: pointer;
+            padding: 7px 10px;
         }
 
         .spinner {
@@ -554,16 +626,16 @@
         .processing-panel {
             margin-top: 14px;
             padding: 16px;
-            border: 1px solid #126da3;
+            border: 1px solid rgba(var(--accent-3-rgb), 0.62);
             border-radius: 8px;
-            background: rgba(0, 240, 255, 0.04);
+            background: rgba(var(--accent-rgb), 0.04);
         }
 
         .advanced-panel {
             margin: 18px 0;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(3, 4, 8, 0.22);
+            background: rgba(var(--bg-rgb), 0.22);
             overflow: hidden;
         }
 
@@ -628,9 +700,9 @@
             gap: 10px;
             align-items: start;
             padding: 9px 10px;
-            border: 1px solid rgba(0, 240, 255, 0.12);
+            border: 1px solid rgba(var(--accent-rgb), 0.12);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.58);
+            background: rgba(var(--panel-rgb), 0.58);
         }
 
         .report-detail-list strong {
@@ -684,7 +756,7 @@
             height: 10px;
             overflow: hidden;
             border-radius: 999px;
-            background: #020711;
+            background: rgba(var(--bg-rgb), 0.72);
             border: 1px solid var(--line);
         }
 
@@ -705,6 +777,44 @@
             background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.42), transparent);
             transform: translateX(-100%);
             animation: progressShimmer 1.2s ease-in-out infinite;
+        }
+
+        .processing-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 12px;
+        }
+
+        .cancel-process-btn {
+            border: 1px solid rgba(244, 114, 182, 0.45);
+            border-radius: 8px;
+            background: rgba(244, 114, 182, 0.1);
+            color: #ffd7e8;
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+
+        .cancel-process-btn:hover {
+            border-color: rgba(244, 114, 182, 0.85);
+            background: rgba(244, 114, 182, 0.18);
+        }
+
+        .stem-policy-note {
+            display: grid;
+            gap: 4px;
+            margin-top: 10px;
+            padding: 10px 12px;
+            border: 1px solid rgba(var(--accent-rgb), 0.22);
+            border-radius: 8px;
+            background: rgba(var(--accent-rgb), 0.045);
+            color: var(--muted);
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .stem-policy-note strong {
+            color: var(--text);
+            font-size: 0.86rem;
         }
 
         @keyframes progressShimmer {
@@ -731,12 +841,12 @@
         .stage-list li.active {
             color: var(--text);
             border-color: var(--accent);
-            background: rgba(0, 240, 255, 0.08);
+            background: rgba(var(--accent-rgb), 0.08);
         }
 
         .stage-list li.done {
             color: var(--accent);
-            border-color: rgba(0, 240, 255, 0.52);
+            border-color: rgba(var(--accent-rgb), 0.52);
         }
 
         .result-header {
@@ -768,11 +878,11 @@
             grid-column: 1 / -1;
             order: 1;
             padding: 16px;
-            border: 1px solid rgba(0, 240, 255, 0.18);
+            border: 1px solid rgba(var(--accent-rgb), 0.18);
             border-radius: 8px;
             background:
-                linear-gradient(135deg, rgba(0, 240, 255, 0.06), rgba(139, 92, 246, 0.05)),
-                rgba(3, 4, 8, 0.38);
+                linear-gradient(135deg, rgba(var(--accent-rgb), 0.06), rgba(var(--accent-2-rgb), 0.05)),
+                rgba(var(--bg-rgb), 0.38);
         }
 
         .ai-analysis-box.result-card {
@@ -794,11 +904,11 @@
             min-height: 100%;
             align-self: stretch;
             padding: 16px;
-            border: 1px solid rgba(0, 240, 255, 0.18);
+            border: 1px solid rgba(var(--accent-rgb), 0.18);
             border-radius: 8px;
             background:
-                linear-gradient(135deg, rgba(0, 240, 255, 0.05), rgba(139, 92, 246, 0.04)),
-                rgba(3, 4, 8, 0.38);
+                linear-gradient(135deg, rgba(var(--accent-rgb), 0.05), rgba(var(--accent-2-rgb), 0.04)),
+                rgba(var(--bg-rgb), 0.38);
         }
 
         .export-panel h4,
@@ -822,7 +932,7 @@
 
         .export-divider {
             height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.26), transparent);
+            background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.26), transparent);
         }
 
         .result-download-card {
@@ -831,11 +941,11 @@
             align-self: stretch;
             padding: 16px;
             text-align: center;
-            border: 1px solid rgba(0, 240, 255, 0.42);
+            border: 1px solid rgba(var(--accent-rgb), 0.42);
             border-radius: 8px;
             background:
-                linear-gradient(135deg, rgba(0, 240, 255, 0.16), rgba(139, 92, 246, 0.12)),
-                rgba(15, 23, 42, 0.92);
+                linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), rgba(var(--accent-2-rgb), 0.12)),
+                rgba(var(--panel-rgb), 0.92);
             box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
         }
 
@@ -861,9 +971,9 @@
             gap: 8px;
             min-height: 44px;
             padding: 10px 12px;
-            border: 1px solid rgba(0, 240, 255, 0.28);
+            border: 1px solid rgba(var(--accent-rgb), 0.28);
             border-radius: 8px;
-            background: rgba(0, 240, 255, 0.06);
+            background: rgba(var(--accent-rgb), 0.06);
             color: var(--text);
             text-align: center;
             text-decoration: none;
@@ -882,7 +992,7 @@
             min-width: 64px;
             padding: 3px 8px;
             border-radius: 999px;
-            border: 1px solid rgba(0, 240, 255, 0.24);
+            border: 1px solid rgba(var(--accent-rgb), 0.24);
             color: var(--accent);
             font-size: 0.68rem;
             line-height: 1;
@@ -900,7 +1010,7 @@
 
         .stem-download-link:hover {
             border-color: var(--accent);
-            background: rgba(0, 240, 255, 0.11);
+            background: rgba(var(--accent-rgb), 0.11);
         }
 
         .status-indicator {
@@ -913,9 +1023,9 @@
         .ai-analysis-box {
             padding: 16px;
             margin-bottom: 18px;
-            border: 1px solid #126da3;
+            border: 1px solid rgba(var(--accent-3-rgb), 0.62);
             border-radius: 8px;
-            background: rgba(0, 240, 255, 0.04);
+            background: rgba(var(--accent-rgb), 0.04);
         }
 
         .ai-analysis-box h4,
@@ -976,7 +1086,7 @@
             padding: 12px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.72);
+            background: rgba(var(--panel-rgb), 0.72);
         }
 
         .metric-label {
@@ -1034,13 +1144,13 @@
             border-radius: 999px;
             background: var(--accent);
             transition: transform 180ms ease;
-            box-shadow: 0 0 16px rgba(0, 240, 255, 0.42);
+            box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.42);
         }
 
         .ab-toggle-btn[data-mode="enhanced"] .ab-knob {
             transform: translateX(36px);
             background: var(--accent-2);
-            box-shadow: 0 0 16px rgba(139, 92, 246, 0.42);
+            box-shadow: 0 0 16px rgba(var(--accent-2-rgb), 0.42);
         }
 
         .waveform-panel {
@@ -1058,17 +1168,17 @@
             padding: 10px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(3, 4, 8, 0.42);
+            background: rgba(var(--bg-rgb), 0.42);
         }
 
         .waveform-row.active {
             border-color: var(--accent);
-            box-shadow: 0 0 18px rgba(0, 240, 255, 0.12);
+            box-shadow: 0 0 18px rgba(var(--accent-rgb), 0.12);
         }
 
         .waveform-row[data-mode="enhanced"].active {
             border-color: var(--accent-2);
-            box-shadow: 0 0 18px rgba(139, 92, 246, 0.16);
+            box-shadow: 0 0 18px rgba(var(--accent-2-rgb), 0.16);
         }
 
         .waveform-label {
@@ -1103,7 +1213,7 @@
             margin-bottom: 16px;
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: rgba(0, 240, 255, 0.04);
+            background: rgba(var(--accent-rgb), 0.04);
         }
 
         .result-section .result-card {
@@ -1130,9 +1240,9 @@
             width: 100%;
             min-height: 0;
             padding: 10px;
-            border: 1px solid rgba(0, 240, 255, 0.14);
+            border: 1px solid rgba(var(--accent-rgb), 0.14);
             border-radius: 8px;
-            background: rgba(15, 23, 42, 0.72);
+            background: rgba(var(--panel-rgb), 0.72);
             color: var(--text);
             text-align: left;
         }
@@ -1140,7 +1250,7 @@
         .batch-summary-item.active,
         .batch-summary-item:hover {
             border-color: var(--accent);
-            background: rgba(0, 240, 255, 0.08);
+            background: rgba(var(--accent-rgb), 0.08);
         }
 
         .batch-summary-item strong {
@@ -1162,7 +1272,7 @@
             text-decoration: none;
             color: var(--text);
             border: 1px solid var(--line);
-            background: rgba(15, 23, 42, 0.9);
+            background: rgba(var(--panel-rgb), 0.9);
         }
 
         .settings-modal {
@@ -1173,7 +1283,7 @@
             align-items: center;
             justify-content: center;
             padding: 20px;
-            background: rgba(2, 6, 23, 0.74);
+            background: rgba(var(--bg-rgb), 0.74);
             backdrop-filter: blur(10px);
         }
 
@@ -1181,18 +1291,26 @@
 
         .settings-dialog {
             width: min(520px, 100%);
+            max-height: min(86vh, 760px);
+            overflow: auto;
             display: grid;
             gap: 12px;
             padding: 20px;
-            border: 1px solid rgba(0, 240, 255, 0.24);
+            border: 1px solid rgba(var(--accent-rgb), 0.24);
             border-radius: 8px;
-            background: rgba(10, 15, 30, 0.98);
+            background: rgba(var(--panel-rgb), 0.98);
             box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
         }
 
         .settings-dialog h3 {
             margin: 0;
             font-size: 1rem;
+        }
+
+        .settings-dialog h4 {
+            margin: 0;
+            font-size: 0.92rem;
+            line-height: 1.35;
         }
 
         .settings-dialog p {
@@ -1206,10 +1324,66 @@
             width: 100%;
             min-height: 42px;
             border-radius: 8px;
-            border: 1px solid rgba(0, 240, 255, 0.24);
-            background: rgba(15, 23, 42, 0.96);
+            border: 1px solid rgba(var(--accent-rgb), 0.24);
+            background: rgba(var(--panel-rgb), 0.96);
             color: var(--text);
             padding: 0 12px;
+        }
+
+        .settings-section-block {
+            display: grid;
+            gap: 10px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(var(--accent-rgb), 0.14);
+        }
+
+        .settings-section-block:first-of-type {
+            padding-top: 0;
+            border-top: 0;
+        }
+
+        .theme-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .theme-field {
+            display: grid;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        .theme-field label {
+            color: var(--muted);
+            font-size: 0.8rem;
+            line-height: 1.35;
+        }
+
+        .settings-modal input[type="color"] {
+            height: 42px;
+            min-height: 42px;
+            padding: 4px;
+            cursor: pointer;
+        }
+
+        .theme-preview {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 6px;
+        }
+
+        .theme-preview span {
+            height: 8px;
+            border-radius: 999px;
+            background: var(--accent);
+        }
+
+        .theme-preview span:nth-child(2) { background: var(--accent-2); }
+        .theme-preview span:nth-child(3) { background: var(--accent-3); }
+
+        .theme-reset-btn {
+            color: var(--accent);
         }
 
         .settings-actions {
@@ -1223,7 +1397,7 @@
             min-height: 42px;
             border-radius: 8px;
             border: 1px solid rgba(148, 163, 184, 0.3);
-            background: rgba(15, 23, 42, 0.96);
+            background: rgba(var(--panel-rgb), 0.96);
             color: var(--text);
             padding: 0 14px;
             font-weight: 800;
@@ -1258,7 +1432,8 @@
             }
             .target-card { min-height: 120px; }
             .option-grid,
-            .manual-grid {
+            .manual-grid,
+            .theme-grid {
                 grid-template-columns: 1fr;
             }
             .settings-btn {
@@ -1307,7 +1482,7 @@
                 </svg>
                 <h1>Resonix AI</h1>
                 <span class="api-status-pill" id="groq-status-pill">Groq 미설정</span>
-                <button class="settings-btn" id="settings-btn" aria-label="Groq API settings">Groq API 설정</button>
+                <button class="settings-btn" id="settings-btn" aria-label="Settings">설정<br>(Settings)</button>
             </div>
             <p class="brand-tag">AI Audio Restoration & Mastering Engine</p>
             <div class="version-pill" id="version-pill">v1.0.0</div>
@@ -1471,9 +1646,13 @@
                     <select id="opt-stem-quality">
                         <option value="fast">&#xBE60;&#xB984; (Fast)</option>
                         <option value="balanced" selected>&#xADE0;&#xD615; (Balanced)</option>
-                        <option value="precision">&#xC815;&#xBC00; (Precision)</option>
+                        <option value="precision">&#xC815;&#xBC00; - &#xC2E4;&#xD5D8;&#xC6A9; (Precision - experimental)</option>
                     </select>
                 </div>
+            </div>
+            <div class="stem-policy-note" id="stem-policy-note" aria-live="polite">
+                <strong>Stem &#xCC98;&#xB9AC; &#xC815;&#xCC45; (Stem policy)</strong>
+                <span id="stem-policy-copy">Stem &#xBD84;&#xB9AC;&#xB97C; &#xCF1C;&#xBA74; balanced&#xB97C; &#xAE30;&#xBCF8;&#xC73C;&#xB85C; &#xC0AC;&#xC6A9;&#xD569;&#xB2C8;&#xB2E4;. (Balanced is the default for stem processing.)</span>
             </div>
 
             <div class="setting-row">
@@ -1561,6 +1740,12 @@
                 <span class="btn-text">AI &#xBCF5;&#xC6D0; &#xC2DC;&#xC791;<br>(Start AI restoration)</span>
                 <span class="spinner hidden" aria-hidden="true"></span>
             </button>
+            <div class="preview-action-panel">
+                <button type="button" id="preset-preview-btn" class="secondary-btn preset-preview-btn" disabled>
+                    프리셋 미리듣기 생성<br>(Create preset previews)
+                </button>
+                <div class="preset-preview-results hidden" id="preset-preview-results" aria-live="polite"></div>
+            </div>
             <div class="processing-panel hidden" id="processing-panel" aria-live="polite">
                 <div class="processing-header">
                     <p class="processing-stage-copy" id="processing-stage">AI &#xB300;&#xAE30; &#xC911; (Ready)</p>
@@ -1568,6 +1753,11 @@
                 </div>
                 <div class="progress-track" aria-hidden="true">
                     <div class="progress-bar" id="processing-bar"></div>
+                </div>
+                <div class="processing-actions">
+                    <button type="button" class="cancel-process-btn hidden" id="cancel-process-btn">
+                        처리 취소<br>(Cancel)
+                    </button>
                 </div>
                 <ol class="stage-list" id="processing-stages">
                     <li>AI &#xBD84;&#xC11D;<br>(Analysis)</li>
@@ -1690,30 +1880,76 @@
     </main>
 
     <div class="settings-modal" id="settings-modal">
-        <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="groq-settings-title">
-            <h3 id="groq-settings-title">Groq API 설정<br>(Groq API settings)</h3>
-            <p>
-                Groq API 키를 저장하면 Resonix AI의 외부 AI 연동 기능을 사용할 준비가 됩니다.<br>
-                (Save your Groq API key to prepare external AI features in Resonix AI.)
-            </p>
-            <p>
-                키는 이 브라우저의 localStorage에만 저장됩니다.<br>
-                (The key is stored only in this browser's localStorage.)
-            </p>
-            <input type="password" id="groq-api-key" placeholder="Groq API key (gsk_...)">
+        <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <h3 id="settings-title">설정<br>(Settings)</h3>
+
+            <div class="settings-section-block">
+                <h4>Groq API 설정<br>(Groq API settings)</h4>
+                <p>
+                    Groq API 키를 저장하면 Resonix AI의 외부 AI 연동 기능을 사용할 준비가 됩니다.<br>
+                    (Save your Groq API key to prepare external AI features in Resonix AI.)
+                </p>
+                <p>
+                    키는 이 브라우저의 localStorage에만 저장됩니다.<br>
+                    (The key is stored only in this browser's localStorage.)
+                </p>
+                <input type="password" id="groq-api-key" placeholder="Groq API key (gsk_...)">
+            </div>
+
+            <div class="settings-section-block">
+                <h4>화면 색감<br>(Appearance theme)</h4>
+                <p>
+                    프리셋을 고르거나 직접 색을 바꿀 수 있습니다. 선택한 색은 자동 저장됩니다.<br>
+                    (Choose a preset or customize the colors. Your theme is saved automatically.)
+                </p>
+                <select id="theme-preset">
+                    <option value="neon-blue">네온 블루 (Neon Blue)</option>
+                    <option value="aurora-green">오로라 그린 (Aurora Green)</option>
+                    <option value="violet-pulse">바이올렛 펄스 (Violet Pulse)</option>
+                    <option value="ruby-night">루비 나이트 (Ruby Night)</option>
+                    <option value="amber-studio">앰버 스튜디오 (Amber Studio)</option>
+                    <option value="soft-sky">소프트 스카이 (Soft Sky)</option>
+                    <option value="peach-coral">피치 코랄 (Peach Coral)</option>
+                    <option value="lilac-mist">라일락 미스트 (Lilac Mist)</option>
+                    <option value="custom">사용자 지정 (Custom)</option>
+                </select>
+                <div class="theme-grid">
+                    <div class="theme-field">
+                        <label for="theme-bg">배경<br>(Background)</label>
+                        <input type="color" id="theme-bg" value="#030408">
+                    </div>
+                    <div class="theme-field">
+                        <label for="theme-accent">주요 색<br>(Primary)</label>
+                        <input type="color" id="theme-accent" value="#00f0ff">
+                    </div>
+                    <div class="theme-field">
+                        <label for="theme-accent-2">보조 색<br>(Secondary)</label>
+                        <input type="color" id="theme-accent-2" value="#8b5cf6">
+                    </div>
+                </div>
+                <div class="theme-preview" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+            </div>
+
             <div class="settings-actions">
-                <button id="modal-cancel">취소<br>(Cancel)</button>
-                <button id="modal-save">저장<br>(Save)</button>
+                <button type="button" class="theme-reset-btn" id="theme-reset">기본값<br>(Reset theme)</button>
+                <button type="button" id="modal-cancel">닫기<br>(Close)</button>
+                <button type="button" id="modal-save">저장<br>(Save)</button>
             </div>
         </div>
     </div>
-    <script src="/static/app.js?v=upload-fix-20260611c"></script>
+    <script src="/static/app.js?v=quality-guard-20260615a"></script>
     <script>
         if (!window.__RESONIX_APP_LOADED__) {
             const script = document.createElement("script");
-            script.src = "app.js?v=upload-fix-20260611c";
+            script.src = "app.js?v=quality-guard-20260615a";
             document.body.appendChild(script);
         }
     </script>
 </body>
 </html>
+
+

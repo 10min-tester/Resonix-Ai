@@ -11,6 +11,12 @@ let currentReport = null;
 let progressTimer = null;
 let progressValue = 0;
 let progressWaitTick = 0;
+let activeJobId = null;
+let activeJobCancelled = false;
+let appCapabilities = {
+    precision_stems: false,
+    recommended_stem_quality: "balanced",
+};
 let currentABMode = "original";
 let waveformAnimationFrame = null;
 let waveformAudioContext = null;
@@ -26,6 +32,50 @@ const waveformState = {
 };
 
 const API_ORIGIN = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+const THEME_STORAGE_KEY = "resonix_theme";
+
+const themePresets = {
+    "neon-blue": {
+        bg: "#030408",
+        accent: "#00f0ff",
+        accent2: "#8b5cf6",
+    },
+    "aurora-green": {
+        bg: "#03100d",
+        accent: "#34d399",
+        accent2: "#38bdf8",
+    },
+    "violet-pulse": {
+        bg: "#080511",
+        accent: "#a78bfa",
+        accent2: "#22d3ee",
+    },
+    "ruby-night": {
+        bg: "#10040b",
+        accent: "#fb7185",
+        accent2: "#f472b6",
+    },
+    "amber-studio": {
+        bg: "#0d0802",
+        accent: "#f59e0b",
+        accent2: "#22d3ee",
+    },
+    "soft-sky": {
+        bg: "#dcecf7",
+        accent: "#2563eb",
+        accent2: "#06b6d4",
+    },
+    "peach-coral": {
+        bg: "#f3ded6",
+        accent: "#e11d48",
+        accent2: "#f97316",
+    },
+    "lilac-mist": {
+        bg: "#e8ddf4",
+        accent: "#7c3aed",
+        accent2: "#db2777",
+    },
+};
 
 function apiUrl(path) {
     return `${API_ORIGIN}${path}`;
@@ -82,27 +132,27 @@ const progressStages = [
 const stemProgressStages = [
     {
         at: 0,
-        text: "AI가 원본 음원을 분석하는 중... (Analyzing source audio...)",
+        text: "\u0041\u0049\uac00 \uc6d0\ubcf8 \uc74c\uc6d0\uc744 \ubd84\uc11d\ud558\ub294 \uc911... (Analyzing source audio...)",
     },
     {
         at: 12,
-        text: "Demucs로 보컬과 반주를 분리하는 중... (Separating vocals and instrumental...)",
+        text: "\u0044\u0065\u006d\u0075\u0063\u0073\ub85c \u0073\u0074\u0065\u006d\uc744 \ubd84\ub9ac\ud558\ub294 \uc911... 4-stem\uc740 \uba87 \ubd84 \uac78\ub9b4 \uc218 \uc788\uc2b5\ub2c8\ub2e4. (Separating stems...)",
     },
     {
         at: 36,
-        text: "분리된 Stem을 청감 목표에 맞게 조정하는 중... (Enhancing separated stems...)",
+        text: "\ubd84\ub9ac\ub41c \u0073\u0074\u0065\u006d\ubcc4\ub85c \ubcf4\uc218\uc801\uc778 \uac1c\uc120\uc744 \uc801\uc6a9\ud558\ub294 \uc911... (Enhancing separated stems...)",
     },
     {
         at: 64,
-        text: "Stem을 다시 합성하며 스테이징을 맞추는 중... (Remixing stems and preserving staging...)",
+        text: "\u0053\u0074\u0065\u006d\uc744 \ub2e4\uc2dc \ud569\uc131\ud558\uba70 \uc2a4\ud14c\uc774\uc9d5\uc744 \ub9de\ucd94\ub294 \uc911... (Remixing stems and preserving staging...)",
     },
     {
         at: 88,
-        text: "최종 헤드룸과 원본 볼륨 매칭을 확인하는 중... Stem 처리는 곡 길이에 따라 오래 걸릴 수 있습니다. (Checking final headroom and source volume match...)",
+        text: "\uc11c\ubc84 \uc791\uc5c5 \uc644\ub8cc\ub97c \uae30\ub2e4\ub9ac\ub294 \uc911... Stem \ubd84\ub9ac, \ud569\uc131, \ud5e4\ub4dc\ub8f8 \uac80\uc0ac\uac00 \uc774\uc5b4\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4. (Waiting for server processing...)",
     },
     {
         at: 100,
-        text: "처리 완료. A/B 비교를 준비했습니다. (Processing complete.)",
+        text: "\ucc98\ub9ac \uc644\ub8cc. A/B \ube44\uad50\ub97c \uc900\ube44\ud588\uc2b5\ub2c8\ub2e4. (Processing complete.)",
     },
 ];
 
@@ -169,6 +219,15 @@ const reasonLabels = new Map([
     ["Preserved low-level source residual during stem remix.", "\uc6d0\ubcf8\uc758 \uc794\ud5a5\uacfc \uacf5\uac04\uac10\uc744 \uc720\uc9c0\ud558\uae30 \uc704\ud574 stem \uc7ac\ud569\uc131 \uc2dc \uc57d\ud55c residual\uc744 \ubcf4\uc874\ud588\uc2b5\ub2c8\ub2e4. (Preserved low-level source residual during stem remix.)"],
     ["Precision stem quality failed; used balanced fallback.", "Precision stem \ud488\uc9c8 \ubaa8\ub4dc\uac00 \uc2e4\ud328\ud574 balanced \ubaa8\ub4dc\ub85c \uc790\ub3d9 \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4. (Precision stem quality failed; used balanced fallback.)"],
     ["4-stem balanced fallback failed; used 2-stem fallback.", "4-stem balanced fallback\uc774 \uc2e4\ud328\ud574 2-stem\uc73c\ub85c \uc790\ub3d9 \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4. (Used 2-stem fallback.)"],
+    ["Precision stem quality is opt-in only; used balanced policy.", "Precision stem? ??? opt-in??? ???? balanced ???? ??????. (Precision stem is opt-in only; used balanced policy.)"],
+    ["Vocal stem tuning prioritizes clarity, sibilance safety, and bleed control.", "?? stem? ???, ??? ??, bleed ??? ??????. (Vocal stem prioritizes clarity and bleed control.)"],
+    ["Drum stem tuning preserves transient impact and avoids over-compression.", "?? stem? ??? transient? ???? ???? ?????. (Drum stem preserves transient impact.)"],
+    ["Bass stem tuning focuses low-end weight while protecting phase and headroom.", "??? stem? ?? ???? ??? ??? ???? ??????. (Bass stem protects phase and headroom.)"],
+    ["Other stem tuning preserves ambience and stereo cues.", "?? ?? stem? ??, ???, ???? ??? ??????. (Other stem preserves ambience and stereo cues.)"],
+    ["Instrumental stem tuning keeps backing balance and staging stable.", "?? stem? ???? ???? ???? ??????. (Instrumental stem keeps backing balance stable.)"],
+    ["Adaptive AI amount reduced processing strength based on source quality.", "소스 품질을 기준으로 AI 처리 강도를 자동으로 낮췄습니다. (Adaptive AI amount reduced processing strength.)"],
+    ["Adaptive AI amount increased processing strength based on source quality.", "소스 품질을 기준으로 AI 처리 강도를 자동으로 높였습니다. (Adaptive AI amount increased processing strength.)"],
+    ["Stem artifact risk reduced per-stem processing strength.", "Stem artifact 위험을 감지해 해당 stem의 처리 강도를 낮췄습니다. (Reduced per-stem processing strength.)"],
 ]);
 
 const dropZone = document.getElementById("drop-zone");
@@ -190,6 +249,7 @@ const aiIntentCopy = document.getElementById("ai-intent-copy");
 const aiIntentTargets = document.getElementById("ai-intent-targets");
 const aiIntentSafety = document.getElementById("ai-intent-safety");
 const aiIntentOutput = document.getElementById("ai-intent-output");
+const stemPolicyCopy = document.getElementById("stem-policy-copy");
 const resultZone = document.getElementById("result-zone");
 const abToggleBtn = document.getElementById("ab-toggle-btn");
 const levelMatchToggle = document.getElementById("level-match-toggle");
@@ -200,6 +260,8 @@ const downloadLink = document.getElementById("download-link");
 const stemDownloadPanel = document.getElementById("stem-download-panel");
 const stemDownloadList = document.getElementById("stem-download-list");
 const singlePreviewPanel = document.getElementById("single-preview-panel");
+const presetPreviewBtn = document.getElementById("preset-preview-btn");
+const presetPreviewResults = document.getElementById("preset-preview-results");
 const batchResultBox = document.getElementById("batch-result-box");
 const batchFeedbackText = document.getElementById("batch-feedback-text");
 const batchSummaryList = document.getElementById("batch-summary-list");
@@ -220,11 +282,197 @@ const processingStage = document.getElementById("processing-stage");
 const processingPercent = document.getElementById("processing-percent");
 const processingBar = document.getElementById("processing-bar");
 const processingStageItems = Array.from(document.querySelectorAll("#processing-stages li"));
+const cancelProcessBtn = document.getElementById("cancel-process-btn");
 const settingsBtn = document.getElementById("settings-btn");
 const settingsModal = document.getElementById("settings-modal");
 const groqApiKeyInput = document.getElementById("groq-api-key");
 const modalSave = document.getElementById("modal-save");
 const modalCancel = document.getElementById("modal-cancel");
+const themePresetSelect = document.getElementById("theme-preset");
+const themeBgInput = document.getElementById("theme-bg");
+const themeAccentInput = document.getElementById("theme-accent");
+const themeAccent2Input = document.getElementById("theme-accent-2");
+const themeResetBtn = document.getElementById("theme-reset");
+
+function normalizeHex(value, fallback = "#00f0ff") {
+    const raw = String(value || "").trim();
+    if (/^#[0-9a-f]{6}$/i.test(raw)) {
+        return raw.toLowerCase();
+    }
+    return fallback;
+}
+
+function hexToRgb(hex) {
+    const normalized = normalizeHex(hex).slice(1);
+    return {
+        r: parseInt(normalized.slice(0, 2), 16),
+        g: parseInt(normalized.slice(2, 4), 16),
+        b: parseInt(normalized.slice(4, 6), 16),
+    };
+}
+
+function rgbToHex({ r, g, b }) {
+    return `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function rgbString(hex) {
+    const { r, g, b } = hexToRgb(hex);
+    return `${r}, ${g}, ${b}`;
+}
+
+function mixHex(from, to, amount = 0.5) {
+    const a = hexToRgb(from);
+    const b = hexToRgb(to);
+    const t = Math.max(0, Math.min(1, amount));
+    return rgbToHex({
+        r: a.r * (1 - t) + b.r * t,
+        g: a.g * (1 - t) + b.g * t,
+        b: a.b * (1 - t) + b.b * t,
+    });
+}
+
+function relativeLuminance(hex) {
+    const { r, g, b } = hexToRgb(hex);
+    const channel = (value) => {
+        const normalized = value / 255;
+        return normalized <= 0.03928
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    return (0.2126 * channel(r)) + (0.7152 * channel(g)) + (0.0722 * channel(b));
+}
+
+function buildTheme(seed) {
+    const bg = normalizeHex(seed.bg, themePresets["neon-blue"].bg);
+    const accent = normalizeHex(seed.accent, themePresets["neon-blue"].accent);
+    const accent2 = normalizeHex(seed.accent2, themePresets["neon-blue"].accent2);
+    const isLight = relativeLuminance(bg) > 0.46;
+    const textColor = isLight ? "#07111f" : "#eef8ff";
+    const anchor = isLight ? "#ffffff" : "#12203a";
+    const panel = mixHex(bg, anchor, isLight ? 0.58 : 0.62);
+    const panelSoft = mixHex(bg, accent, isLight ? 0.08 : 0.14);
+    const muted = mixHex(textColor, bg, isLight ? 0.48 : 0.34);
+    const accent3 = mixHex(accent, accent2, 0.38);
+
+    return {
+        bg,
+        panel,
+        panelSoft,
+        text: textColor,
+        muted,
+        accent,
+        accent2,
+        accent3,
+    };
+}
+
+function setCssVar(name, value) {
+    document.documentElement.style.setProperty(name, value);
+}
+
+function applyTheme(themeConfig, { persist = true, syncControls = true } = {}) {
+    const preset = themeConfig?.preset || "neon-blue";
+    const seed = preset === "custom"
+        ? {
+            bg: themeConfig.bg,
+            accent: themeConfig.accent,
+            accent2: themeConfig.accent2,
+        }
+        : (themePresets[preset] || themePresets["neon-blue"]);
+    const theme = buildTheme(seed);
+
+    setCssVar("--bg", theme.bg);
+    setCssVar("--panel", theme.panel);
+    setCssVar("--panel-soft", theme.panelSoft);
+    setCssVar("--line", `rgba(${rgbString(theme.accent)}, 0.24)`);
+    setCssVar("--text", theme.text);
+    setCssVar("--muted", theme.muted);
+    setCssVar("--accent", theme.accent);
+    setCssVar("--accent-2", theme.accent2);
+    setCssVar("--accent-3", theme.accent3);
+    setCssVar("--accent-rgb", rgbString(theme.accent));
+    setCssVar("--accent-2-rgb", rgbString(theme.accent2));
+    setCssVar("--accent-3-rgb", rgbString(theme.accent3));
+    setCssVar("--bg-rgb", rgbString(theme.bg));
+    setCssVar("--panel-rgb", rgbString(theme.panel));
+
+    if (syncControls) {
+        syncThemeControls({
+            preset,
+            bg: theme.bg,
+            accent: theme.accent,
+            accent2: theme.accent2,
+        });
+    }
+    if (persist) {
+        localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify({
+            preset,
+            bg: theme.bg,
+            accent: theme.accent,
+            accent2: theme.accent2,
+        }));
+    }
+    renderWaveforms();
+}
+
+function loadSavedTheme() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(THEME_STORAGE_KEY) || "null");
+        if (saved && typeof saved === "object") {
+            return saved;
+        }
+    } catch {}
+    return { preset: "neon-blue", ...themePresets["neon-blue"] };
+}
+
+function syncThemeControls(themeConfig) {
+    if (themePresetSelect) {
+        themePresetSelect.value = themeConfig.preset || "neon-blue";
+    }
+    if (themeBgInput) {
+        themeBgInput.value = normalizeHex(themeConfig.bg, themePresets["neon-blue"].bg);
+    }
+    if (themeAccentInput) {
+        themeAccentInput.value = normalizeHex(themeConfig.accent, themePresets["neon-blue"].accent);
+    }
+    if (themeAccent2Input) {
+        themeAccent2Input.value = normalizeHex(themeConfig.accent2, themePresets["neon-blue"].accent2);
+    }
+}
+
+function getCurrentThemeFromInputs() {
+    return {
+        preset: "custom",
+        bg: themeBgInput?.value || themePresets["neon-blue"].bg,
+        accent: themeAccentInput?.value || themePresets["neon-blue"].accent,
+        accent2: themeAccent2Input?.value || themePresets["neon-blue"].accent2,
+    };
+}
+
+function initializeThemeControls() {
+    applyTheme(loadSavedTheme(), { persist: false });
+
+    themePresetSelect?.addEventListener("change", () => {
+        const preset = themePresetSelect.value;
+        applyTheme({
+            preset,
+            ...(themePresets[preset] || getCurrentThemeFromInputs()),
+        });
+    });
+
+    [themeBgInput, themeAccentInput, themeAccent2Input].forEach((input) => {
+        input?.addEventListener("input", () => {
+            applyTheme(getCurrentThemeFromInputs(), { syncControls: false });
+            if (themePresetSelect) {
+                themePresetSelect.value = "custom";
+            }
+        });
+    });
+
+    themeResetBtn?.addEventListener("click", () => {
+        applyTheme({ preset: "neon-blue", ...themePresets["neon-blue"] });
+    });
+}
 
 settingsBtn.addEventListener("click", () => {
     groqApiKeyInput.value = localStorage.getItem("groq_api_key") || "";
@@ -273,8 +521,12 @@ window.addEventListener("storage", (event) => {
     if (event.key === "groq_api_key") {
         updateGroqStatusPill();
     }
+    if (event.key === THEME_STORAGE_KEY) {
+        applyTheme(loadSavedTheme(), { persist: false });
+    }
 });
 
+initializeThemeControls();
 loadAppVersion().catch(() => {});
 updateGroqStatusPill();
 
@@ -352,6 +604,13 @@ function handleFileSelect(fileList) {
     ensureFileInputMounted();
 
     processBtn.disabled = false;
+    if (presetPreviewBtn) {
+        presetPreviewBtn.disabled = false;
+    }
+    if (presetPreviewResults) {
+        presetPreviewResults.classList.add("hidden");
+        presetPreviewResults.innerHTML = "";
+    }
     processBtn.querySelector(".btn-text").textContent = files.length > 1 ? text.batchStart : text.start;
     resultZone.classList.add("hidden");
     aiAnalysisBox.classList.add("hidden");
@@ -408,10 +667,17 @@ document.querySelectorAll('input[name="volume-mode"]').forEach((input) => {
     input.addEventListener("change", updateAiIntentPanel);
 });
 document.getElementById("opt-denoise").addEventListener("change", updateAiIntentPanel);
-stemSeparationMode.addEventListener("change", updateAiIntentPanel);
-stemQualityMode.addEventListener("change", updateAiIntentPanel);
+stemSeparationMode.addEventListener("change", () => {
+    updateStemQualityPolicy();
+    updateAiIntentPanel();
+});
+stemQualityMode.addEventListener("change", () => {
+    updateStemQualityPolicy();
+    updateAiIntentPanel();
+});
 outputSampleRate.addEventListener("change", updateAiIntentPanel);
 outputBitDepth.addEventListener("change", updateAiIntentPanel);
+updateStemQualityPolicy();
 updateAiIntentPanel();
 
 processBtn.addEventListener("click", async () => {
@@ -447,23 +713,38 @@ processBtn.addEventListener("click", async () => {
         processBtn.disabled = false;
         spinner.classList.add("hidden");
         btnText.textContent = selectedAudioFiles.length > 1 ? text.batchStart : text.start;
+        activeJobId = null;
+        activeJobCancelled = false;
+        cancelProcessBtn?.classList.add("hidden");
     }
 });
 
+cancelProcessBtn?.addEventListener("click", async () => {
+    if (!activeJobId || activeJobCancelled) {
+        return;
+    }
+    activeJobCancelled = true;
+    cancelProcessBtn.disabled = true;
+    processingStage.textContent = "취소 요청 중... (Cancelling...)";
+    try {
+        await fetch(apiUrl(`/api/jobs/${activeJobId}`), { method: "DELETE" });
+    } catch (error) {
+        console.warn("Cancel request failed", error);
+    }
+});
+
+presetPreviewResults?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-preview-target]");
+    if (!button) {
+        return;
+    }
+    applyPreviewTarget(button.dataset.previewTarget);
+});
 async function processSingleAudio() {
     const processForm = createProcessingForm();
     processForm.append("file", originalAudioBlob);
 
-    const processResponse = await fetch(apiUrl("/api/process"), {
-        method: "POST",
-        body: processForm,
-    });
-
-    if (!processResponse.ok) {
-        throw new Error(await readErrorMessage(processResponse, text.processFailed));
-    }
-
-    return processResponse.json();
+    return startAndWaitForJob("/api/jobs/process", processForm);
 }
 
 async function processBatchAudio() {
@@ -472,16 +753,64 @@ async function processBatchAudio() {
         processForm.append("files", file);
     });
 
-    const processResponse = await fetch(apiUrl("/api/process-batch"), {
+    return startAndWaitForJob("/api/jobs/process-batch", processForm);
+}
+
+async function startAndWaitForJob(endpoint, formData) {
+    const startResponse = await fetch(apiUrl(endpoint), {
         method: "POST",
-        body: processForm,
+        body: formData,
     });
 
-    if (!processResponse.ok) {
-        throw new Error(await readErrorMessage(processResponse, text.processFailed));
+    if (!startResponse.ok) {
+        throw new Error(await readErrorMessage(startResponse, text.processFailed));
     }
 
-    return processResponse.json();
+    const job = await startResponse.json();
+    activeJobId = job.job_id;
+    activeJobCancelled = false;
+    if (cancelProcessBtn) {
+        cancelProcessBtn.disabled = false;
+        cancelProcessBtn.classList.remove("hidden");
+    }
+    renderJobProgress(job);
+    return waitForJob(job.job_id);
+}
+
+async function waitForJob(jobId) {
+    while (true) {
+        await delay(1200);
+        const response = await fetch(apiUrl(`/api/jobs/${jobId}`));
+        if (!response.ok) {
+            throw new Error(await readErrorMessage(response, text.processFailed));
+        }
+        const job = await response.json();
+        renderJobProgress(job);
+
+        if (job.status === "completed") {
+            return job.result;
+        }
+        if (job.status === "cancelled") {
+            throw new Error("처리가 취소되었습니다. (Processing cancelled.)");
+        }
+        if (job.status === "failed") {
+            throw new Error(job.error || text.processFailed);
+        }
+    }
+}
+
+function renderJobProgress(job) {
+    const percent = Number.isFinite(Number(job.percent)) ? Number(job.percent) : progressValue;
+    setProcessingProgress(percent, job.stage || null);
+    processingPanel.classList.toggle("is-waiting", job.status === "queued" || job.status === "running");
+    if (cancelProcessBtn) {
+        cancelProcessBtn.classList.toggle("hidden", !["queued", "running"].includes(job.status));
+        cancelProcessBtn.disabled = activeJobCancelled || !["queued", "running"].includes(job.status);
+    }
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createProcessingForm() {
@@ -501,6 +830,105 @@ function createProcessingForm() {
     return processForm;
 }
 
+function createPreviewForm() {
+    const form = new FormData();
+    const previewTargets = getPreviewTargetList();
+    form.append("file", selectedAudioFiles[0]);
+    form.append("targets", previewTargets.join(","));
+    form.append("intensity", String(Number(intensitySlider.value) / 100));
+    form.append("use_denoise", document.getElementById("opt-denoise").checked ? "true" : "false");
+    form.append("volume_mode", getSelectedVolumeMode());
+    form.append("output_sample_rate", outputSampleRate.value);
+    form.append("output_bit_depth", outputBitDepth.value);
+    return form;
+}
+
+function getPreviewTargetList() {
+    const selected = getSelectedTargetList();
+    if (selected.length >= 2) {
+        return selected.slice(0, 3);
+    }
+    const first = selected[0] || "hifi_clean";
+    const defaults = [first, "hifi_clean", "warm_analog", "bass_boost", "hifi_bright"];
+    return Array.from(new Set(defaults)).slice(0, 3);
+}
+
+async function createPresetPreviews() {
+    if (!selectedAudioFiles.length || !presetPreviewBtn || !presetPreviewResults) {
+        return;
+    }
+    presetPreviewBtn.disabled = true;
+    presetPreviewResults.classList.remove("hidden");
+    presetPreviewResults.innerHTML = `<div class="preset-preview-item"><div><strong>미리듣기 생성 중</strong><span>(Creating preset previews...)</span></div></div>`;
+
+    try {
+        const response = await fetch(apiUrl("/api/preview-targets"), {
+            method: "POST",
+            body: createPreviewForm(),
+        });
+        if (!response.ok) {
+            throw new Error(await readErrorMessage(response, "Preset preview failed"));
+        }
+        const result = await response.json();
+        renderPresetPreviews(result);
+    } catch (error) {
+        presetPreviewResults.innerHTML = `<div class="preset-preview-item"><div><strong>미리듣기 실패</strong><span>${escapeHtml(error.message || String(error))}</span></div></div>`;
+    } finally {
+        presetPreviewBtn.disabled = false;
+    }
+}
+
+function renderPresetPreviews(result) {
+    if (!presetPreviewResults) {
+        return;
+    }
+    const items = Array.isArray(result.items) ? result.items : [];
+    if (!items.length) {
+        presetPreviewResults.innerHTML = `<div class="preset-preview-item"><div><strong>결과 없음</strong><span>(No preview results.)</span></div></div>`;
+        return;
+    }
+    presetPreviewResults.innerHTML = items.map((item) => {
+        const target = item.target || "hifi_clean";
+        const label = translateTarget(target);
+        const score = Number.isFinite(Number(item.validation_score)) ? `${Number(item.validation_score).toFixed(0)}점` : "-";
+        const overall = item.validation_overall || "review";
+        const risk = item.validation_risk || {};
+        const penalty = Number.isFinite(Number(risk.penalties)) ? Number(risk.penalties).toFixed(1) : "0.0";
+        const url = resolveApiAssetUrl(item.download_url);
+        const filename = item.filename || `preview_${target}.wav`;
+        return `
+            <div class="preset-preview-item">
+                <div>
+                    <strong>${escapeHtml(label)}</strong>
+                    <span>검증 ${score} / ${escapeHtml(overall)} · Risk ${escapeHtml(penalty)} · LUFS ${formatNumber(item.lufs, 1)} · TP ${formatNumber(item.true_peak_db, 1)} dBTP</span>
+                </div>
+                <div class="preset-preview-actions">
+                    <button type="button" class="preset-preview-select" data-preview-target="${escapeHtml(target)}">현재 목표로 적용</button>
+                    <a href="${escapeHtml(url)}" download="${escapeHtml(filename)}">재생/저장</a>
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+function applyPreviewTarget(target) {
+    if (!target) {
+        return;
+    }
+    const inputs = Array.from(document.querySelectorAll('input[name="target-mode"]'));
+    let matched = false;
+    inputs.forEach((input) => {
+        input.checked = input.value === target;
+        matched = matched || input.checked;
+    });
+    if (!matched) {
+        const fallback = inputs.find((input) => input.value === "hifi_clean");
+        if (fallback) {
+            fallback.checked = true;
+        }
+    }
+    updateTargetComboWarning();
+    updateAiIntentPanel();
+}
 function getManualDspParams() {
     if (!manualDspEnable.checked) {
         return null;
@@ -705,15 +1133,7 @@ function updateAiIntentPanel() {
     );
     aiIntentTargets.textContent = `${targetText} / AI ${amount}%`;
     aiIntentSafety.textContent = [
-        stemEnabled ? "2-stem 분리 처리" : null,
-        volumeMode === "match_source" ? "원본 음량 유지" : "AI 목표 음량",
-        "트루 피크 헤드룸",
-        "스테레오 세이프",
-        denoiseEnabled ? "노이즈 처리 사용" : "노이즈 처리 생략",
-        manualEnabled ? "수동 DSP 보정 포함" : null,
-    ].filter(Boolean).join(" / ");
-    aiIntentSafety.textContent = [
-        stemEnabled ? (selectedStemMode === "4stem" ? "4-stem 실험 처리" : "2-stem 분리 처리") : null,
+        stemEnabled ? (selectedStemMode === "4stem" ? `4-stem ${selectedStemQuality}` : `2-stem ${selectedStemQuality}`) : null,
         volumeMode === "match_source" ? "원본 음량 유지" : "AI 목표 음량",
         "트루 피크 헤드룸",
         "스테레오 세이프",
@@ -721,6 +1141,56 @@ function updateAiIntentPanel() {
         manualEnabled ? "수동 DSP 보정 포함" : null,
     ].filter(Boolean).join(" / ");
     aiIntentOutput.textContent = `${formatOutputSampleRateLabel(outputSampleRate.value)} / ${outputBitDepth.value}-bit PCM`;
+}
+
+function updateStemQualityPolicy() {
+    if (!stemQualityMode) {
+        return;
+    }
+
+    const precisionOption = Array.from(stemQualityMode.options).find((option) => option.value === "precision");
+    if (precisionOption) {
+        precisionOption.disabled = !appCapabilities.precision_stems;
+        precisionOption.textContent = appCapabilities.precision_stems
+            ? "정밀 - 실험용 (Precision - experimental)"
+            : "정밀 - 모바일 제한 (Precision - desktop only)";
+    }
+    if (stemQualityMode.value === "precision" && !appCapabilities.precision_stems) {
+        stemQualityMode.value = appCapabilities.recommended_stem_quality || "balanced";
+    }
+
+    if (!stemPolicyCopy) {
+        return;
+    }
+    const mode = getSelectedStemMode();
+    const quality = getSelectedStemQualityMode();
+    const estimate = estimateStemProcessingTime(mode, quality);
+    if (mode === "off") {
+        stemPolicyCopy.textContent = "Stem 분리를 끄면 전체 믹스 기준으로 빠르게 처리합니다. (Stem separation is off; processing uses the full mix.)";
+    } else if (quality === "precision") {
+        stemPolicyCopy.textContent = `${mode} precision은 실험용입니다. 첫 실행 시 모델 다운로드와 긴 처리 시간이 발생할 수 있습니다. 예상: ${estimate}.`;
+    } else {
+        const precisionScope = appCapabilities.precision_stems
+            ? "이 PC 로컬 접속에서는 Precision을 선택할 수 있습니다."
+            : "모바일 접속에서는 Precision을 제한합니다.";
+        stemPolicyCopy.textContent = `${mode} ${quality} 권장. 실사용 기본은 balanced이며, 예상 처리 시간은 ${estimate}입니다. ${precisionScope}`;
+    }
+}
+
+function estimateStemProcessingTime(mode, quality) {
+    if (mode === "off") {
+        return "1분 이내";
+    }
+    if (mode === "2stem") {
+        return quality === "fast" ? "1-3분" : "2-5분";
+    }
+    if (quality === "fast") {
+        return "2-5분";
+    }
+    if (quality === "precision") {
+        return "8분 이상";
+    }
+    return "3-7분";
 }
 
 function buildAiIntentTitle(targets) {
@@ -745,9 +1215,11 @@ function buildAiIntentCopy(targets, amount, volumeMode, denoiseEnabled, manualEn
     const denoiseText = denoiseEnabled
         ? "노이즈 플로어를 함께 판단"
         : "노이즈 제거를 생략";
-    const stemText = stemMode !== "off"
-        ? " Demucs 2-stem 분리 후 보컬과 반주를 각각 보수적으로 개선하고 재합성합니다."
-        : "";
+    const stemText = stemMode === "4stem"
+        ? ` Demucs 4-stem ${stemQuality} 분리 후 보컬, 드럼, 베이스, 기타 악기를 역할별로 개선하고 재합성합니다.`
+        : stemMode === "2stem"
+            ? ` Demucs 2-stem ${stemQuality} 분리 후 보컬과 반주를 각각 보수적으로 개선하고 재합성합니다.`
+            : "";
     const manualText = manualEnabled
         ? " 수동 DSP 보정값을 최종 의도 위에 얹습니다."
         : "";
@@ -799,6 +1271,9 @@ function getSelectedStemMode() {
 
 function getSelectedStemQualityMode() {
     const mode = stemQualityMode?.value || "balanced";
+    if (mode === "precision" && !appCapabilities.precision_stems) {
+        return "balanced";
+    }
     return ["fast", "balanced", "precision"].includes(mode) ? mode : "balanced";
 }
 
@@ -811,10 +1286,16 @@ async function loadAppVersion() {
         return;
     }
     const version = await response.json();
+    appCapabilities = {
+        ...appCapabilities,
+        ...(version.capabilities || {}),
+    };
     versionPill.textContent = `v${version.version || "1.0.0"}`;
     versionPill.title = version.log_dir
         ? `Logs: ${version.log_dir}`
         : "Resonix AI";
+    updateStemQualityPolicy();
+    updateAiIntentPanel();
 }
 
 function resetLevelMatchGains() {
@@ -945,89 +1426,202 @@ function formatQualitySummary(report) {
     const stereo = summary.stereo_preserved
         ? "\uc2a4\ud14c\ub808\uc624 \ubcf4\uc874 (Stereo preserved)"
         : "\uc2a4\ud14c\ub808\uc624 \ubcc0\ud654 \uc788\uc74c (Stereo changed)";
-    return `${volume}. ${headroom}. ${clipping}. ${stereo}.`;
+    const validation = Number.isFinite(Number(summary.validation_score))
+        ? ` 자동 검증 ${formatNumber(summary.validation_score, 0)}점 (${summary.validation_overall || "review"}).`
+        : "";
+    return `${volume}. ${headroom}. ${clipping}. ${stereo}.${validation}`;
+}
+
+function formatQualityValidation(report) {
+    const validation = report.quality_validation || {};
+    const checks = Array.isArray(validation.checks) ? validation.checks : [];
+    if (!checks.length) {
+        return "자동 A/B 검증 정보가 없습니다. (No automatic A/B validation.)";
+    }
+    const statusLabel = {
+        pass: "통과",
+        review: "검토",
+        fail: "주의",
+    }[validation.overall] || "검토";
+    const weakChecks = checks
+        .filter((item) => item.status !== "pass")
+        .slice(0, 2)
+        .map((item) => `${item.label}: ${item.detail}`)
+        .join(" / ");
+    const detail = weakChecks || "핵심 항목 안정";
+    return `${statusLabel} ${formatNumber(validation.score, 0)} / 100. ${detail}. (Automatic A/B validation)`;
+}
+
+function formatAdaptiveAi(recommendation) {
+    const adaptive = recommendation?.adaptive_ai || {};
+    if (!adaptive.enabled) {
+        return "자동 보정 정보 없음 (No adaptive AI data)";
+    }
+    const requested = Math.round(Number(adaptive.requested || 0) * 100);
+    const effective = Math.round(Number(adaptive.effective || 0) * 100);
+    const delta = effective - requested;
+    const condition = {
+        already_polished: "원본 품질 양호",
+        needs_recovery: "복원 필요",
+        fragile: "민감한 소스",
+        balanced: "균형 소스",
+        bypass: "보정 생략",
+    }[adaptive.source_condition] || adaptive.source_condition || "균형 소스";
+    const reason = Array.isArray(adaptive.reasons) && adaptive.reasons.length
+        ? adaptive.reasons[0]
+        : "Source stayed close to requested strength.";
+    return `${requested}% -> ${effective}% (${formatDelta(delta)}%). ${condition}. ${reason}`;
+}
+
+function formatDspBudget(recommendation) {
+    const budget = recommendation?.dsp_budget || {};
+    const reductions = budget.reductions || {};
+    if (!budget.enabled || Object.keys(reductions).length === 0) {
+        return "DSP 예산 제한 정보 없음 (No DSP budget data)";
+    }
+    const limited = Object.entries(reductions)
+        .filter(([, value]) => Number(value) < 0.999)
+        .map(([key, value]) => `${key} ${(Number(value) * 100).toFixed(0)}%`);
+    return limited.length
+        ? `과처리 방지 예산 적용: ${limited.join(" / ")} (DSP budget limited)`
+        : "과처리 방지 예산 내 처리 (Within DSP budget)";
+}
+
+function formatHarmonicSafety(recommendation) {
+    const guard = recommendation?.harmonic_safety || {};
+    if (!guard.enabled) {
+        return "하모닉 보호 정보 없음 (No harmonic safety data)";
+    }
+    const factor = Number.isFinite(Number(guard.factor)) ? `${(Number(guard.factor) * 100).toFixed(0)}%` : "-";
+    const reasons = Array.isArray(guard.reasons) && guard.reasons.length
+        ? ` / ${guard.reasons.join(", ")}`
+        : "";
+    return `Exciter/Saturation 안전 계수 ${factor}${reasons}`;
+}
+
+function formatStemRisk(report) {
+    const stem = report?.stem_separation || {};
+    const riskMap = stem.stem_risk_map || stem.fallback_risk_map || {};
+    if (!riskMap.enabled) {
+        return stem.bypassed
+            ? "Stem 위험으로 full-mix fallback 적용 (Stem branch bypassed)"
+            : "Stem 위험도 정보 없음 (No stem risk data)";
+    }
+    const average = formatNumber(riskMap.average, 2);
+    const max = formatNumber(riskMap.max, 2);
+    const decision = riskMap.decision || "review";
+    return `평균 ${average}, 최대 ${max}, 판단 ${decision} (Stem risk map)`;
+}
+
+function formatRemixOptimization(report) {
+    const opt = report?.stem_separation?.remix_optimization || {};
+    if (!opt.applied) {
+        return "Stem remix 기본 gain 사용 (Default stem remix gain)";
+    }
+    const gainText = Object.entries(opt.gains || {})
+        .map(([name, value]) => `${name} ${Number(value).toFixed(2)}`)
+        .join(" / ");
+    const reduction = Number.isFinite(Number(opt.error_reduction))
+        ? `${(Number(opt.error_reduction) * 100).toFixed(0)}%`
+        : "-";
+    return `${gainText}. 원본 대비 오차 개선 ${reduction} (Source-match remix optimization)`;
+}
+
+function formatQualityGuard(report) {
+    const guard = report?.quality_guard || {};
+    if (!guard.applied) {
+        return "품질 drift 보호 확인 완료 (Quality drift checked)";
+    }
+    const blend = `${(Number(guard.blend || 0) * 100).toFixed(0)}%`;
+    const severity = guard.severity || "warning";
+    const flags = Array.isArray(guard.flags) ? guard.flags.join(", ") : "";
+    return `${severity}: 원본 보존 blend ${blend} / ${flags}`;
 }
 
 function renderReportDetails(report) {
     const before = report.before || {};
     const after = report.after || {};
     const summary = report.quality_summary || {};
+    const recommendation = report.recommendation || {};
     const outputFormat = report.output_format || {};
     const bitDepth = outputFormat.bit_depth ? `${outputFormat.bit_depth}-bit` : "24-bit";
     const sampleRate = outputFormat.sample_rate || after.sr;
 
     const rows = [
         {
-            label: "\ud488\uc9c8 \ud310\uc815 (Quality)",
+            label: "품질 판정 (Quality)",
             value: formatQualitySummary(report),
         },
         {
-            label: "\ud575\uc2ec \uc218\uce58 (Core)",
+            label: "자동 A/B 검증 (A/B validation)",
+            value: formatQualityValidation(report),
+        },
+        {
+            label: "AI 자동 보정 (Adaptive AI)",
+            value: formatAdaptiveAi(recommendation),
+        },
+        {
+            label: "DSP 예산 (DSP budget)",
+            value: formatDspBudget(recommendation),
+        },
+        {
+            label: "하모닉 안전 (Harmonic safety)",
+            value: formatHarmonicSafety(recommendation),
+        },
+        {
+            label: "품질 보호 (Quality guard)",
+            value: formatQualityGuard(report),
+        },
+        {
+            label: "핵심 수치 (Core)",
             value: `LUFS ${formatNumber(before.lufs, 1)} -> ${formatNumber(after.lufs, 1)} (${formatDelta((after.lufs || 0) - (before.lufs || 0))}), True peak ${formatNumber(after.true_peak_db, 1)} dBTP`,
         },
         {
-            label: "\uacf5\uac04/\ubd84\ub9ac (Image)",
+            label: "공간/분리 (Image)",
             value: `Stereo ${formatNumber(after.stereo_width, 2)} / Phase ${formatNumber(after.phase_correlation, 2)}, Separation ${formatNumber(summary.band_separation_score, 0)} / 100`,
         },
         {
-            label: "\ucd9c\ub825 (Output)",
+            label: "출력 (Output)",
             value: `WAV ${bitDepth} / ${formatSampleRate(sampleRate)}`,
         },
     ];
-    if (report.stem_separation?.enabled) {
-        const bleedCleanup = report.stem_separation?.vocal_bleed_cleanup
-            ? " / 보컬 bleed cleanup 적용 (Vocal bleed cleanup)"
-            : "";
+
+    const stem = report.stem_separation || {};
+    if (stem.enabled || stem.bypassed || stem.fallback_risk_map) {
+        const mode = stem.mode === "4stem"
+            ? "Demucs 4-stem: 보컬 / 드럼 / 베이스 / 기타 악기 개별 처리"
+            : stem.bypassed
+                ? "Stem branch bypass: full-mix DSP fallback"
+                : "Demucs 2-stem: 보컬 / 반주 개별 처리";
+        const quality = stem.quality_mode ? ` / 품질 ${stem.quality_mode}` : "";
+        const fallback = stem.fallback_mode ? ` / ${stem.requested_mode || "requested"} -> ${stem.fallback_mode} fallback` : "";
         rows.splice(1, 0, {
-            label: "Stem \ubd84\ub9ac (Stem)",
-            value: `Demucs 2-stem: \ubcf4\uceec Voice Focus / \ubc18\uc8fc \uccad\uac10 \ubaa9\ud45c \uc801\uc6a9 (Vocals + instrumental remix)${bleedCleanup}`,
+            label: "Stem 분리 (Stem)",
+            value: `${mode}${quality}${fallback}`,
         });
-        if (report.stem_separation?.mode === "4stem") {
-            rows[1].value = `Demucs 4-stem: 보컬 / 드럼 / 베이스 / 기타 악기 개별 처리 (Vocals + drums + bass + other)${bleedCleanup}`;
-        }
-        if (report.stem_separation?.quality_mode) {
-            rows[1].value += ` / 품질 ${report.stem_separation.quality_mode} (Quality ${report.stem_separation.quality_mode})`;
-        }
-        if (report.stem_separation?.fallback_mode) {
-            rows[1].value += ` / ${report.stem_separation.requested_mode} -> ${report.stem_separation.fallback_mode} fallback`;
-        }
-        if (report.stem_separation?.fallback_quality_mode) {
-            rows[1].value += ` / ${report.stem_separation.requested_quality_mode} -> ${report.stem_separation.fallback_quality_mode} quality fallback`;
-        }
-        if (report.stem_separation?.auto_gain_balance) {
-            rows[1].value += " / stem별 자동 gain balance";
-        }
-    }
-    if (report.quality_guard?.applied) {
         rows.splice(2, 0, {
-            label: "AI 품질 보호 (Quality guard)",
-            value: `원본 보존 blend ${(Number(report.quality_guard.blend || 0) * 100).toFixed(0)}% / ${report.quality_guard.flags.join(", ")}`,
+            label: "Stem 위험도 (Stem risk)",
+            value: formatStemRisk(report),
+        });
+        rows.splice(3, 0, {
+            label: "Stem 재합성 (Stem remix)",
+            value: formatRemixOptimization(report),
         });
     }
 
     reportDetailList.innerHTML = rows.map((row) => `
         <li>
-            <strong>${row.label}</strong>
-            <span>${row.value}</span>
+            <strong>${escapeHtml(row.label)}</strong>
+            <span>${escapeHtml(row.value)}</span>
         </li>
     `).join("");
 }
-
 function startProcessingProgress() {
     clearProgressTimer();
     progressWaitTick = 0;
     processingPanel.classList.remove("hidden");
     processingPanel.classList.remove("is-waiting");
-    setProcessingProgress(3);
-    progressTimer = setInterval(() => {
-        if (progressValue >= 92) {
-            refreshProcessingWaitingCopy();
-            return;
-        }
-        const remaining = 92 - progressValue;
-        const step = Math.max(1, Math.ceil(remaining * 0.08));
-        setProcessingProgress(Math.min(92, progressValue + step));
-    }, 650);
+    setProcessingProgress(1, "작업을 서버에 전송하는 중... (Sending job to server...)");
 }
 
 function completeProcessingProgress() {
@@ -1041,6 +1635,7 @@ function failProcessingProgress() {
     processingPanel.classList.remove("hidden");
     processingPanel.classList.remove("is-waiting");
     processingStage.textContent = "\ucc98\ub9ac \uc911 \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4. (Processing failed.)";
+    cancelProcessBtn?.classList.add("hidden");
 }
 
 function resetProcessingProgress() {
@@ -1050,6 +1645,7 @@ function resetProcessingProgress() {
     processingPanel.classList.remove("is-waiting");
     processingPanel.classList.add("hidden");
     setProcessingProgress(0);
+    cancelProcessBtn?.classList.add("hidden");
 }
 
 function clearProgressTimer() {
@@ -1059,16 +1655,16 @@ function clearProgressTimer() {
     }
 }
 
-function setProcessingProgress(value) {
+function setProcessingProgress(value, stageText = null) {
     progressValue = Math.max(0, Math.min(100, Math.round(value)));
     processingPercent.textContent = `${progressValue}%`;
     processingBar.style.width = `${progressValue}%`;
-    processingPanel.classList.toggle("is-waiting", progressValue >= 92 && progressValue < 100);
+    processingPanel.classList.toggle("is-waiting", progressValue > 0 && progressValue < 100);
 
     const activeStages = getActiveProgressStages();
     const textStageIndex = getProgressStageIndex(progressValue, activeStages);
     const itemStageIndex = Math.min(textStageIndex, processingStageItems.length - 1);
-    processingStage.textContent = activeStages[textStageIndex].text;
+    processingStage.textContent = stageText || activeStages[textStageIndex].text;
     processingStageItems.forEach((item, index) => {
         item.classList.toggle("done", index < itemStageIndex || progressValue === 100);
         item.classList.toggle("active", index === itemStageIndex && progressValue < 100);
@@ -1304,8 +1900,18 @@ function resetWaveforms() {
 
 function renderWaveforms() {
     const progress = getPlaybackProgress();
-    drawWaveform(waveformOriginal, waveformState.original, "#00f0ff", progress, currentABMode === "original");
-    drawWaveform(waveformEnhanced, waveformState.enhanced, "#8b5cf6", progress, currentABMode === "enhanced");
+    drawWaveform(waveformOriginal, waveformState.original, getCssColor("--accent", "#00f0ff"), progress, currentABMode === "original");
+    drawWaveform(waveformEnhanced, waveformState.enhanced, getCssColor("--accent-2", "#8b5cf6"), progress, currentABMode === "enhanced");
+}
+
+function getCssColor(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+}
+
+function getCssRgb(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
 }
 
 function drawWaveform(canvas, waveform, color, progress, isActive) {
@@ -1360,8 +1966,10 @@ function drawWaveform(canvas, waveform, color, progress, isActive) {
     if (progress > 0) {
         const playhead = Math.max(0, Math.min(width, width * progress));
         const gradient = ctx.createLinearGradient(0, 0, playhead, 0);
-        gradient.addColorStop(0, "rgba(0, 240, 255, 0.12)");
-        gradient.addColorStop(1, isActive ? "rgba(139, 92, 246, 0.14)" : "rgba(0, 240, 255, 0.06)");
+        const accentRgb = getCssRgb("--accent-rgb", "0, 240, 255");
+        const accent2Rgb = getCssRgb("--accent-2-rgb", "139, 92, 246");
+        gradient.addColorStop(0, `rgba(${accentRgb}, 0.12)`);
+        gradient.addColorStop(1, isActive ? `rgba(${accent2Rgb}, 0.14)` : `rgba(${accentRgb}, 0.06)`);
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, playhead, height);
         ctx.strokeStyle = isActive ? color : "rgba(159, 184, 207, 0.46)";
